@@ -5,7 +5,7 @@ import "log/slog"
 type ServerConfig struct {
 	Server struct {
 		Host string `yaml:"host"`
-		Port int    `yaml:"port"`
+		Port int    `yaml:"port" default:"8600"`
 
 		LogLevel slog.Level `yaml:"log_level"`
 	} `yaml:"server"`
@@ -14,24 +14,24 @@ type ServerConfig struct {
 		ApiKey string `yaml:"api_key"`
 	} `yaml:"registered_checkers"`
 	Database struct {
-		Path string `yaml:"path"`
+		Path string `yaml:"path" default:"eyrie.db"`
 	} `yaml:"database"`
 	TaskQueue struct {
 		Processor struct {
-			ProducerAddress string `yaml:"producer_address"`
-			ConsumerAddress string `yaml:"consumer_address"`
+			ProducerAddress string `yaml:"producer_address" default:"mem://processor_tasks"`
+			ConsumerAddress string `yaml:"consumer_address" default:"mem://processor_tasks"`
 		} `yaml:"processor"`
 		Ingester struct {
-			ProducerAddress string `yaml:"producer_address"`
-			ConsumerAddress string `yaml:"consumer_address"`
+			ProducerAddress string `yaml:"producer_address" default:"mem://ingester_tasks"`
+			ConsumerAddress string `yaml:"consumer_address" default:"mem://ingester_tasks"`
 		} `yaml:"ingester"`
 		Alerter struct {
-			ProducerAddress string `yaml:"producer_address"`
-			ConsumerAddress string `yaml:"consumer_address"`
+			ProducerAddress string `yaml:"producer_address" default:"mem://alerter_tasks"`
+			ConsumerAddress string `yaml:"consumer_address" default:"mem://alerter_tasks"`
 		} `yaml:"alerter"`
 	} `yaml:"task_queue"`
 	Dataset struct {
-		RetentionDays int `yaml:"retention_days"`
+		RetentionDays int `yaml:"retention_days" default:"90"`
 	} `yaml:"dataset"`
 	Alerting struct {
 		Webhook struct {

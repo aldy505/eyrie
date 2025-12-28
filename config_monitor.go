@@ -7,9 +7,9 @@ import (
 type Monitor struct {
 	ID                  string            `yaml:"id" json:"id"`
 	Name                string            `yaml:"name" json:"name"`
-	Interval            string            `yaml:"interval" json:"interval"`
-	Method              string            `yaml:"method" json:"method"`
-	SkipTLSVerify       bool              `yaml:"skip_tls_verify" json:"skip_tls_verify"`
+	Interval            string            `yaml:"interval" json:"interval" default:"1m"`
+	Method              string            `yaml:"method" json:"method" default:"GET"`
+	SkipTLSVerify       bool              `yaml:"skip_tls_verify" json:"skip_tls_verify" default:"false"`
 	Url                 string            `yaml:"url" json:"url"`
 	Headers             map[string]string `yaml:"headers" json:"headers"`
 	ExpectedStatusCodes []int             `yaml:"expected_status_codes" json:"-"`

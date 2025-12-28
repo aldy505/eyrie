@@ -148,7 +148,6 @@ func (w *ProcessorWorker) Start() error {
 }
 
 func (w *ProcessorWorker) Stop() error {
-	w.shutdown <- struct{}{}
 	close(w.shutdown)
 	return nil
 }

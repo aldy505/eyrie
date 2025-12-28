@@ -4,64 +4,46 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/guregu/null/v5"
-	"github.com/marcboeker/go-duckdb/v2"
 	"gocloud.dev/pubsub"
 )
 
 type Server struct {
-	connector         *duckdb.Connector
+	*http.Server
 	db                *sql.DB
 	serverConfig      ServerConfig
 	monitorConfig     MonitorConfig
 	processorProducer *pubsub.Topic
 	ingesterProducer  *pubsub.Topic
-	httpServer        *http.Server
 }
 
-func NewServer(config ServerConfig, monitorConfig MonitorConfig) (*Server, error) {
-	connector, err := duckdb.NewConnector(config.Database.Path, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create duckdb connector: %w", err)
-	}
-
-	db := sql.OpenDB(connector)
-
-	if err := Migrate(db, context.Background(), true); err != nil {
-		return nil, fmt.Errorf("failed to migrate database: %w", err)
-	}
-
-	processorProducer, err := pubsub.OpenTopic(context.Background(), config.TaskQueue.Processor.ProducerAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open task queue producer: %w", err)
-	}
-
-	ingesterProducer, err := pubsub.OpenTopic(context.Background(), config.TaskQueue.Ingester.ProducerAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open ingester queue producer: %w", err)
-	}
-
-	server := &Server{
-		connector:         connector,
-		db:                db,
-		serverConfig:      config,
-		monitorConfig:     monitorConfig,
-		processorProducer: processorProducer,
-		ingesterProducer:  ingesterProducer,
-	}
-
-	return server, nil
+type ServerOptions struct {
+	Database          *sql.DB
+	ServerConfig      ServerConfig
+	MonitorConfig     MonitorConfig
+	ProcessorProducer *pubsub.Topic
+	IngesterProducer  *pubsub.Topic
 }
 
-func (s *Server) Start() error {
+func NewServer(options ServerOptions) (*Server, error) {
+	s := &Server{
+		db:                options.Database,
+		serverConfig:      options.ServerConfig,
+		monitorConfig:     options.MonitorConfig,
+		processorProducer: options.ProcessorProducer,
+		ingesterProducer:  options.IngesterProducer,
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /uptime-data", s.UptimeDataHandler)
 	mux.HandleFunc("POST /checker/register", s.CheckerRegistration)
@@ -71,33 +53,27 @@ func (s *Server) Start() error {
 		Addr:    net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
 		Handler: mux,
 	}
-	s.httpServer = srv
-	return srv.ListenAndServe()
-}
 
-func (s *Server) Shutdown(ctx context.Context) error {
-	if s.httpServer != nil {
-		if err := s.httpServer.Shutdown(ctx); err != nil {
-			return fmt.Errorf("failed to shutdown http server: %w", err)
-		}
-	}
-	if err := s.processorProducer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to close task queue producer: %w", err)
-	}
-	if err := s.ingesterProducer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to close ingester queue producer: %w", err)
-	}
-	if err := s.db.Close(); err != nil {
-		return fmt.Errorf("failed to close database: %w", err)
-	}
-	if err := s.connector.Close(); err != nil {
-		return fmt.Errorf("failed to close connector: %w", err)
-	}
-	return nil
+	s.Server = srv
+
+	return s, nil
 }
 
 type CommonErrorResponse struct {
 	Error string `json:"error"`
+}
+
+type UptimeDataMonitorMetadata struct {
+	ID   string
+	Name string
+}
+
+type UptimeDataHistorical struct {
+	LatencyMs      int64
+	MonitorAge     int
+	DailyDowntimes map[int]struct {
+		DurationMinutes int `json:"duration_minutes"`
+	}
 }
 
 type UptimeDataHandlerResponse struct {
@@ -116,12 +92,214 @@ type UptimeDataHandlerResponse struct {
 
 func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	conn, err := s.db.Conn(ctx)
+
+	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
 	if err != nil {
-		http.Error(w, "failed to get database connection", http.StatusInternalServerError)
+		slog.ErrorContext(ctx, "fetching valid monitor ids", slog.String("error", err.Error()))
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+			Error: "failed to fetch monitor ids",
+		})
 		return
 	}
+
+	wg := sync.WaitGroup{}
+	mutex := sync.Mutex{}
+	m := make(map[string]UptimeDataHistorical)
+
+	for _, monitor := range monitorMetadata {
+		wg.Go(func() {
+			historical, err := s.fetchFromRawMonitorHistorical(ctx, monitor.ID)
+			if err != nil {
+				slog.ErrorContext(ctx, "fetching monitor historical", slog.String("monitor_id", monitor.ID), slog.String("error", err.Error()))
+				return
+			}
+
+			mutex.Lock()
+			m[monitor.ID] = historical
+			mutex.Unlock()
+		})
+	}
+
+	wg.Wait()
+
+	response := UptimeDataHandlerResponse{
+		LastUpdated: time.Now(),
+		Monitors: []struct {
+			ID             string `json:"id"`
+			Name           string `json:"name"`
+			ResponseTimeMs int64  `json:"response_time_ms"`
+			Age            int    `json:"age"`
+			Downtimes      map[int]struct {
+				DurationMinutes int `json:"duration_minutes"`
+			} `json:"downtimes"`
+		}{},
+		RetentionDays: s.serverConfig.Dataset.RetentionDays,
+	}
+
+	for _, monitor := range monitorMetadata {
+		if historical, exists := m[monitor.ID]; exists {
+			response.Monitors = append(response.Monitors, struct {
+				ID             string `json:"id"`
+				Name           string `json:"name"`
+				ResponseTimeMs int64  `json:"response_time_ms"`
+				Age            int    `json:"age"`
+				Downtimes      map[int]struct {
+					DurationMinutes int `json:"duration_minutes"`
+				} `json:"downtimes"`
+			}{
+				ID:             monitor.ID,
+				Name:           monitor.Name,
+				ResponseTimeMs: historical.LatencyMs,
+				Age:            historical.MonitorAge,
+				Downtimes:      historical.DailyDowntimes,
+			})
+		}
+	}
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorMetadata, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring database connection: %w", err)
+	}
 	defer conn.Close()
+
+	yesterday := time.Now().AddDate(0, 0, -1)
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id
+		FROM monitor_historical
+		WHERE created_at >= ?`, yesterday)
+	if err != nil {
+		return nil, fmt.Errorf("querying valid monitor ids: %w", err)
+	}
+	defer rows.Close()
+
+	var monitors []UptimeDataMonitorMetadata
+	for rows.Next() {
+		var monitor UptimeDataMonitorMetadata
+		if err := rows.Scan(&monitor.ID); err != nil {
+			return nil, fmt.Errorf("scanning monitor row: %w", err)
+		}
+
+		// Find the name from s.monitorConfig
+		for _, m := range s.monitorConfig.Monitors {
+			if m.ID == monitor.ID {
+				monitor.Name = m.Name
+				break
+			}
+		}
+		monitors = append(monitors, monitor)
+	}
+
+	return monitors, nil
+}
+
+// ErrMonitorConfigNotFound is returned when a monitor configuration cannot be found for a given monitor ID.
+var ErrMonitorConfigNotFound = errors.New("monitor config not found")
+
+func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return UptimeDataHistorical{}, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+	SELECT
+		region,
+		status_code,
+		latency_ms,
+		created_at
+	FROM
+		monitor_historical
+	WHERE
+		monitor_id = ?`,
+		monitorId,
+	)
+	if err != nil {
+		return UptimeDataHistorical{}, fmt.Errorf("querying monitor historical: %w", err)
+	}
+	defer rows.Close()
+
+	var monitorHistoricals []MonitorHistorical
+	for rows.Next() {
+		var monitorHistorical MonitorHistorical
+		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
+			return UptimeDataHistorical{}, fmt.Errorf("scanning monitor historical: %w", err)
+		}
+		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
+	}
+
+	// Find monitor config for this monitor
+	var monitorConfig Monitor
+	var foundMonitorConfig bool
+	for _, config := range s.monitorConfig.Monitors {
+		if config.ID == monitorId {
+			monitorConfig = config
+			foundMonitorConfig = true
+			break
+		}
+	}
+
+	if !foundMonitorConfig {
+		return UptimeDataHistorical{}, ErrMonitorConfigNotFound
+	}
+
+	// Group each monitor historicals on a daily bucket
+	dailyBucket := make(map[time.Time][]MonitorHistorical)
+	for _, mh := range monitorHistoricals {
+		year, month, day := mh.CreatedAt.Date()
+		bucketDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+		if _, exists := dailyBucket[bucketDate]; !exists {
+			dailyBucket[bucketDate] = []MonitorHistorical{}
+		}
+		dailyBucket[bucketDate] = append(dailyBucket[bucketDate], mh)
+	}
+
+	var uptimeHistorical = UptimeDataHistorical{
+		LatencyMs:  0,
+		MonitorAge: len(dailyBucket),
+		DailyDowntimes: make(map[int]struct {
+			DurationMinutes int `json:"duration_minutes"`
+		}),
+	}
+	// From each bucket, calculate the average latency and downtime
+	for date, historials := range dailyBucket {
+		var totalLatency int64 = 0
+		var totalChecks int64 = 0
+		var downtimeMinutes int = 0
+
+		for _, mh := range historials {
+			totalLatency += int64(mh.LatencyMs)
+			totalChecks++
+
+			if !slices.Contains(monitorConfig.ExpectedStatusCodes, mh.StatusCode) {
+				downtimeMinutes += 1 // assuming each check is done every minute
+			}
+		}
+
+		averageLatency := totalLatency / totalChecks
+		uptimeHistorical.LatencyMs += averageLatency
+		// The index for `DailyDowntimes` map is calculated as the number of days since the latest monitor.
+		// Today means 0, yesterday means 1, and so on forth.
+		dailyDowntimesIndex := time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC).Sub(date).Hours() / 24
+		uptimeHistorical.DailyDowntimes[int(dailyDowntimesIndex)] = struct {
+			DurationMinutes int `json:"duration_minutes"`
+		}{
+			DurationMinutes: downtimeMinutes,
+		}
+	}
+
+	// Calculate overall average latency
+	uptimeHistorical.LatencyMs = uptimeHistorical.LatencyMs / int64(len(dailyBucket))
+
+	return uptimeHistorical, nil
 }
 
 type CheckerRegistrationRequest struct {
@@ -167,15 +345,16 @@ func (s *Server) CheckerRegistration(w http.ResponseWriter, r *http.Request) {
 }
 
 type CheckerSubmissionRequest struct {
-	MonitorID       string            `json:"monitor_id"`
-	LatencyMs       int64             `json:"latency_ms"`
-	StatusCode      int               `json:"status_code"`
-	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
-	ResponseBody    null.String       `json:"response_body,omitempty"`
-	TlsVersion      null.String       `json:"tls_version,omitempty"`
-	TlsCipher       null.String       `json:"tls_cipher,omitempty"`
-	TlsExpiry       null.Time         `json:"tls_expiry,omitempty"`
-	Timestamp       time.Time         `json:"timestamp"`
+	MonitorID       string              `json:"monitor_id"`
+	LatencyMs       int64               `json:"latency_ms"`
+	StatusCode      int                 `json:"status_code"`
+	ResponseHeaders map[string]string   `json:"response_headers,omitempty"`
+	ResponseBody    null.String         `json:"response_body,omitempty"`
+	TlsVersion      null.String         `json:"tls_version,omitempty"`
+	TlsCipher       null.String         `json:"tls_cipher,omitempty"`
+	TlsExpiry       null.Time           `json:"tls_expiry,omitempty"`
+	Timestamp       time.Time           `json:"timestamp"`
+	Timings         CheckerTraceTimings `json:"timings,omitempty"`
 }
 
 func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
@@ -256,6 +435,8 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 			slog.ErrorContext(ctx, "failed to enqueue ingester submission", slog.String("error", err.Error()))
 		}
 	})
+
+	wg.Wait()
 
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)

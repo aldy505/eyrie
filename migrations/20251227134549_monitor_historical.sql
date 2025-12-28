@@ -9,7 +9,13 @@ CREATE TABLE IF NOT EXISTS monitor_historical (
     tls_version VARCHAR(255),
     tls_cipher VARCHAR(255),
     tls_expiry TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    timing_conn_acquired_ms INTEGER,
+    timing_first_response_byte_ms INTEGER,
+    timing_dns_lookup_start_ms INTEGER,
+    timing_dns_lookup_done_ms INTEGER,
+    timing_tls_handshake_start_ms INTEGER,
+    timing_tls_handshake_done_ms INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (monitor_id, created_at)
 );
 

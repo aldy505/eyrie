@@ -1,0 +1,23 @@
+monitors:
+  - id: "example-monitor-1"
+    name: "Example Monitor 1"
+    interval: "1m"
+    method: "GET"
+    skip_tls_verify: false
+    url: "https://example.com"
+    expected_status_codes:
+      - 200
+      - 301
+      - 302
+      - 400
+    headers:
+      User-Agent: "EyrieMonitor/1.0"
+    timeout_seconds: 30
+  - id: "example-monitor-2"
+    name: "Example Monitor 2"
+    interval: "5m"
+    method: "GET"
+    skip_tls_verify: true
+    url: "https://another-example.com/health"
+    expected_status_codes:
+      - 200

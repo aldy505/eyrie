@@ -74,7 +74,6 @@ func (w *IngesterWorker) Start() error {
 }
 
 func (w *IngesterWorker) Stop() error {
-	w.shutdown <- struct{}{}
 	close(w.shutdown)
 	return nil
 }
@@ -88,9 +87,60 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 
 	// Insert raw monitor historical data
 	_, err = conn.ExecContext(ctx, `
-		INSERT INTO monitor_historical (monitor_id, region, status_code, latency_ms, response_body, tls_version, tls_cipher, tls_expiry, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, submission.MonitorID, region, submission.StatusCode, submission.LatencyMs, submission.ResponseBody, submission.TlsVersion, submission.TlsCipher, submission.TlsExpiry, submission.Timestamp)
+		INSERT INTO
+			monitor_historical
+			(
+				monitor_id, 
+				region, 
+				status_code, 
+				latency_ms, 
+				response_body, 
+				tls_version, 
+				tls_cipher, 
+				tls_expiry,
+				timing_conn_acquired_ms,
+				timing_first_response_byte_ms,
+				timing_dns_lookup_start_ms,
+				timing_dns_lookup_done_ms,
+				timing_tls_handshake_start_ms,
+				timing_tls_handshake_done_ms, 
+				created_at
+			)
+		VALUES
+			(
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?,
+				?
+			)
+	`,
+		submission.MonitorID,
+		region,
+		submission.StatusCode,
+		submission.LatencyMs,
+		submission.ResponseBody,
+		submission.TlsVersion,
+		submission.TlsCipher,
+		submission.TlsExpiry,
+		submission.Timings.ConnAcquiredMs,
+		submission.Timings.FirstResponseByteMs,
+		submission.Timings.DNSLookupStartMs,
+		submission.Timings.DNSLookupDoneMs,
+		submission.Timings.TLSHandshakeStartMs,
+		submission.Timings.TLSHandshakeDoneMs,
+		submission.Timestamp,
+	)
 	if err != nil {
 		return fmt.Errorf("inserting monitor historical: %w", err)
 	}
@@ -99,6 +149,7 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 }
 
 func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, monitorID string, date time.Time) error {
+	// FIXME: I don't think this is the correct logic. Might want to revisit this some other time.
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("getting db connection: %w", err)

@@ -1,0 +1,33 @@
+server:
+  host: "127.0.0.1"
+  port: 8600
+  log_level: "INFO"
+
+registered_checkers:
+  - region: "us-east-1"
+    api_key: "your-api-key-here"
+  - region: "eu-west-1"
+    api_key: "your-api-key-here"
+
+database:
+  path: "/var/lib/eyrie/database.db"
+
+task_queue:
+  processor:
+    producer_address: "mem://processor_tasks"
+    consumer_address: "mem://processor_tasks"
+  ingester:
+    producer_address: "mem://ingester_tasks"
+    consumer_address: "mem://ingester_tasks"
+  alerter:
+    producer_address: "mem://alerter_tasks"
+    consumer_address: "mem://alerter_tasks"
+
+dataset:
+  retention_days: 90
+
+alerting:
+  webhook:
+    enabled: false
+    url: "https://example.com/webhook"
+    hmac_secret: "your-hmac-secret-here"
