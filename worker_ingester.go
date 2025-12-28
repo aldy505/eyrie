@@ -35,7 +35,7 @@ func (w *IngesterWorker) Start() error {
 		case <-w.shutdown:
 			return nil
 		default:
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
 			message, err := w.subscriber.Receive(ctx)

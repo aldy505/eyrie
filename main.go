@@ -75,6 +75,11 @@ func main() {
 
 		db := sql.OpenDB(connector)
 
+		if err := Migrate(db, ctx, true); err != nil {
+			slog.Error("failed to migrate database", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+
 		ingesterProducer, err := pubsub.OpenTopic(ctx, serverConfig.TaskQueue.Ingester.ProducerAddress)
 		if err != nil {
 			slog.Error("failed to open ingester producer", slog.String("error", err.Error()))
