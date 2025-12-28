@@ -117,8 +117,6 @@ REGISTER_UPSTREAM:
 
 				wg.Wait()
 				checkerCancel()
-				continue
-
 			}
 
 			// We fetch new monitor config from upstream in the background
@@ -142,6 +140,8 @@ REGISTER_UPSTREAM:
 					c.nextUpstreamFetch = &nextUpstreamFetch
 				}()
 			}
+
+			time.Sleep(time.Second)
 		}
 	}
 }
@@ -368,6 +368,9 @@ func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerS
 			time.Sleep(time.Millisecond * 10)
 			continue
 		}
+
+		// Success
+		return
 	}
 
 	if parentErr != nil {

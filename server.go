@@ -270,12 +270,12 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 		}),
 	}
 	// From each bucket, calculate the average latency and downtime
-	for date, historials := range dailyBucket {
+	for date, historicals := range dailyBucket {
 		var totalLatency int64 = 0
 		var totalChecks int64 = 0
 		var downtimeMinutes int = 0
 
-		for _, mh := range historials {
+		for _, mh := range historicals {
 			totalLatency += int64(mh.LatencyMs)
 			totalChecks++
 
@@ -411,11 +411,11 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 	wg := sync.WaitGroup{}
 	wg.Go(func() {
 		err := s.processorProducer.Send(ctx, &pubsub.Message{
-			LoggableID: requestId,
-			Body:       body,
+			Body: body,
 			Metadata: map[string]string{
 				"region":      region,
 				"received_at": time.Now().UTC().Format(time.RFC3339),
+				"request_id":  requestId,
 			},
 		})
 		if err != nil {
@@ -424,11 +424,11 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 	})
 	wg.Go(func() {
 		err := s.ingesterProducer.Send(ctx, &pubsub.Message{
-			LoggableID: requestId,
-			Body:       body,
+			Body: body,
 			Metadata: map[string]string{
 				"region":      region,
 				"received_at": time.Now().UTC().Format(time.RFC3339),
+				"request_id":  requestId,
 			},
 		})
 		if err != nil {

@@ -5,9 +5,9 @@ server:
 
 registered_checkers:
   - region: "us-east-1"
-    api_key: "your-api-key-here"
+    api_key: "us-east-1-api-key-here"
   - region: "eu-west-1"
-    api_key: "your-api-key-here"
+    api_key: "eu-west-1-api-key-here"
 
 database:
   path: "/var/lib/eyrie/database.db"

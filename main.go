@@ -32,6 +32,7 @@ func main() {
 
 	if mode == nil {
 		slog.Error("mode flag is required")
+		
 		os.Exit(1)
 		return
 	}
