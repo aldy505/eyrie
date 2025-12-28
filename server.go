@@ -172,7 +172,7 @@ func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorM
 
 	yesterday := time.Now().AddDate(0, 0, -1)
 	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id
+		SELECT DISTINCT monitor_id
 		FROM monitor_historical
 		WHERE created_at >= ?`, yesterday)
 	if err != nil {
@@ -288,7 +288,9 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 		uptimeHistorical.LatencyMs += averageLatency
 		// The index for `DailyDowntimes` map is calculated as the number of days since the latest monitor.
 		// Today means 0, yesterday means 1, and so on forth.
-		dailyDowntimesIndex := time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC).Sub(date).Hours() / 24
+		// The calculation is done by finding the difference in hours between now and the date, then dividing by 24 to get days.
+		now := time.Now().UTC()
+		dailyDowntimesIndex := int(now.Sub(date).Hours() / 24)
 		uptimeHistorical.DailyDowntimes[int(dailyDowntimesIndex)] = struct {
 			DurationMinutes int `json:"duration_minutes"`
 		}{
