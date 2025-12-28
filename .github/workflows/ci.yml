@@ -41,7 +41,7 @@ jobs:
     runs-on: ${{ matrix.architecture }}
     timeout-minutes: 15
     concurrency:
-      group: build-binary-${{ github.ref_name || github.sha }}
+      group: build-binary-${{ github.ref_name || github.sha }}-${{ matrix.architecture }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
