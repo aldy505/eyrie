@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,9 @@ type ServerOptions struct {
 	IngesterProducer  *pubsub.Topic
 }
 
+//go:embed frontend/dist
+var frontendFilesystem embed.FS
+
 func NewServer(options ServerOptions) (*Server, error) {
 	s := &Server{
 		db:                options.Database,
@@ -48,6 +52,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.HandleFunc("GET /uptime-data", s.UptimeDataHandler)
 	mux.HandleFunc("POST /checker/register", s.CheckerRegistration)
 	mux.HandleFunc("POST /checker/submit", s.CheckerSubmission)
+	mux.Handle("/", SpaHandler(frontendFilesystem, "index.html"))
 
 	srv := &http.Server{
 		Addr:    net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
