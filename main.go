@@ -32,7 +32,7 @@ func main() {
 
 	if mode == nil {
 		slog.Error("mode flag is required")
-		
+
 		os.Exit(1)
 		return
 	}
@@ -87,6 +87,34 @@ func main() {
 			os.Exit(1)
 		}
 
+		alerterProducer, err := pubsub.OpenTopic(ctx, serverConfig.TaskQueue.Alerter.ProducerAddress)
+		if err != nil {
+			slog.Error("failed to open alerter producer", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+
+		ingesterSubscriber, err := pubsub.OpenSubscription(ctx, serverConfig.TaskQueue.Ingester.ConsumerAddress)
+		if err != nil {
+			slog.Error("failed to open ingester subscriber", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+
+		processorSubscriber, err := pubsub.OpenSubscription(ctx, serverConfig.TaskQueue.Processor.ConsumerAddress)
+		if err != nil {
+			slog.Error("failed to open processor subscriber", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+
+		alerterSubscriber, err := pubsub.OpenSubscription(ctx, serverConfig.TaskQueue.Alerter.ConsumerAddress)
+		if err != nil {
+			slog.Error("failed to open alerter subscriber", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+
+		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber)
+		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig)
+		alerterWorker := NewAlerterWorker(alerterSubscriber)
+
 		srv, err := NewServer(ServerOptions{
 			Database:          db,
 			ServerConfig:      serverConfig,
@@ -110,12 +138,40 @@ func main() {
 				slog.Error("failed to shutdown server", slog.String("error", err.Error()))
 			}
 
+			if err := alerterWorker.Stop(); err != nil {
+				slog.Error("failed to stop alerter worker", slog.String("error", err.Error()))
+			}
+
+			if err := processorWorker.Stop(); err != nil {
+				slog.Error("failed to stop processor worker", slog.String("error", err.Error()))
+			}
+
+			if err := ingesterWorker.Stop(); err != nil {
+				slog.Error("failed to stop ingester worker", slog.String("error", err.Error()))
+			}
+
+			if err := alerterProducer.Shutdown(shutdownCtx); err != nil {
+				slog.Error("failed to shutdown alerter producer", slog.String("error", err.Error()))
+			}
+
 			if err := ingesterProducer.Shutdown(shutdownCtx); err != nil {
 				slog.Error("failed to shutdown ingester producer", slog.String("error", err.Error()))
 			}
 
 			if err := processorProducer.Shutdown(shutdownCtx); err != nil {
 				slog.Error("failed to shutdown processor producer", slog.String("error", err.Error()))
+			}
+
+			if err := alerterSubscriber.Shutdown(shutdownCtx); err != nil {
+				slog.Error("failed to shutdown alerter subscriber", slog.String("error", err.Error()))
+			}
+
+			if err := processorSubscriber.Shutdown(shutdownCtx); err != nil {
+				slog.Error("failed to shutdown processor subscriber", slog.String("error", err.Error()))
+			}
+
+			if err := ingesterSubscriber.Shutdown(shutdownCtx); err != nil {
+				slog.Error("failed to shutdown ingester subscriber", slog.String("error", err.Error()))
 			}
 
 			if err := db.Close(); err != nil {
@@ -127,6 +183,33 @@ func main() {
 			}
 
 			slog.Info("graceful shutdown complete")
+		}()
+
+		go func() {
+			slog.Info("starting ingester worker")
+			if err := ingesterWorker.Start(); err != nil {
+				slog.Error("ingester worker error", slog.String("error", err.Error()))
+				os.Exit(1)
+			}
+			slog.Info("shutting down ingester worker")
+		}()
+
+		go func() {
+			slog.Info("starting processor worker")
+			if err := processorWorker.Start(); err != nil {
+				slog.Error("processor worker error", slog.String("error", err.Error()))
+				os.Exit(1)
+			}
+			slog.Info("shutting down processor worker")
+		}()
+
+		go func() {
+			slog.Info("starting alerter worker")
+			if err := alerterWorker.Start(); err != nil {
+				slog.Error("alerter worker error", slog.String("error", err.Error()))
+				os.Exit(1)
+			}
+			slog.Info("shutting down alerter worker")
 		}()
 
 		slog.Info("starting server", "host", serverConfig.Server.Host, "port", serverConfig.Server.Port)
