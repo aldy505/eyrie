@@ -191,15 +191,19 @@ func (w *ProcessorWorker) lookback(ctx context.Context, monitorId string, since 
 	return results, nil
 }
 
-func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorical, minute time.Duration) (buckets map[time.Time][]MonitorHistorical, latestTime time.Time, earliestTime time.Time) {
-	earliestTime = time.Now()
-	latestTime = time.Now().Add(-100 * 365 * 24 * time.Hour) // Far past time
+func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorical, interval time.Duration) (buckets map[time.Time][]MonitorHistorical, earliestTime time.Time, latestTime time.Time) {
+	// Earliest means the oldest time. Latest means the most recent time.
+	earliestTime = time.Now().Add(100 * 365 * 24 * time.Hour) // Far future time
+	latestTime = time.Now().Add(-100 * 365 * 24 * time.Hour)  // Far past time
 	buckets = make(map[time.Time][]MonitorHistorical)
 
 	for _, submission := range submissions {
-		bucketTime := submission.CreatedAt.Truncate(minute)
+		bucketTime := submission.CreatedAt.Truncate(interval)
 		buckets[bucketTime] = append(buckets[bucketTime], submission)
 
+		// Track earliest and latest time
+		// Say bucket time is 2024-01-01 10:15:00, the first comparison with the
+		// initialized earliestTime and latestTime will always update both.
 		// Track earliest and latest time
 		if bucketTime.Before(earliestTime) {
 			earliestTime = bucketTime
@@ -209,7 +213,7 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 		}
 	}
 
-	return buckets, latestTime, earliestTime
+	return buckets, earliestTime, latestTime
 }
 
 func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmissions map[time.Time][]MonitorHistorical, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (shouldAlert bool, alertReason string, err error) {
@@ -231,8 +235,8 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 
 	buckets := make(map[time.Time]*SubmissionBucket)
 
-	// We start from latestTime to earliestTime, increasing by minuteInterval
-	for t := latestTime; !t.Before(earliestTime); t = t.Add(minuteInterval) {
+	// We start from earliestTime to latestTime, increasing by minuteInterval
+	for t := earliestTime; !t.After(latestTime); t = t.Add(minuteInterval) {
 		bucketedSubmission, exists := bucketedSubmissions[t]
 		if !exists {
 			// TotalCount and FailureCount of zero means no submissions during this minute
@@ -263,17 +267,17 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 	}
 
 	// Now we analyze the buckets to see if there is a widespread failure,
-	// starting from the earliestTime to latestTime.
+	// starting from the latestTime to earliestTime.
 	// If the state changes from healthy to unhealthy for the latest bucket,
 	// we trigger an alert. And vice versa, if the state changes from unhealthy
 	// to healthy for the latest bucket, we can also trigger a recovery alert.
 	// But, if there is no state change, we do nothing.
 	//
-	// We still need to iterate through all buckets from the earliestTime because
+	// We still need to iterate through all buckets from the latestTime because
 	// we can't know for sure if there are buckets with 0 TotalCount in between.
 
 	var stateHealthy bool = true
-	for t := earliestTime; !t.After(latestTime); t = t.Add(-minuteInterval) {
+	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
 		currentBucketTime := t
 
 		submissionBucket, exists := buckets[currentBucketTime]
