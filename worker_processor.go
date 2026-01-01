@@ -344,7 +344,7 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 		failureRate := float64(submissionBucket.FailureCount) / float64(submissionBucket.TotalCount)
 		if len(submissionBucket.Regions) > 1 && failureRate >= 0.5 {
 			// Unhealthy state
-			if stateHealthy && currentBucketTime.Equal(latestTime) {
+			if currentBucketTime.Equal(latestTime) {
 				// State changed from healthy to unhealthy on the latest bucket, trigger alert
 				// List out regions that reported failures
 				var regionNames []string
@@ -358,10 +358,16 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 				return shouldAlert, alertReason, nil
 			}
 
-			// Previous state might likely be unhealthy already and we are still in unhealthy state
-			// Do we need to return early?
-			shouldAlert = false
-			return shouldAlert, "", nil
+			if !stateHealthy {
+				stateHealthy = false
+				shouldAlert = false
+				return shouldAlert, "", nil
+			} else {
+				// Current state is healthy. Let's trigger a recovery alert.
+				shouldAlert = true
+				alertReason = "Monitor has recovered and is now healthy"
+				return shouldAlert, alertReason, nil
+			}
 		} else if len(submissionBucket.Regions) == 1 && failureRate >= 0.5 {
 			// Unhealthy state (only one region with failures)
 			// If this is the latest bucket, don't want to trigger an alert immediately here,
@@ -371,15 +377,26 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 				continue
 			}
 
+			// Entering this block means we are not in the latest bucket.
 			// For whatever reason, let's trigger the alert.
 			if !stateHealthy {
 				shouldAlert = true
 				alertReason = fmt.Sprintf("High failure rate detected: %.2f%% failures from single region", failureRate*100)
 				return shouldAlert, alertReason, nil
+			} else {
+				// Current state is healthy. Let's trigger a recovery alert.
+				shouldAlert = true
+				alertReason = "Monitor has recovered and is now healthy"
+				return shouldAlert, alertReason, nil
 			}
 		} else if failureRate < 0.5 {
 			// Healthy state
-			if !stateHealthy && currentBucketTime.Equal(latestTime) {
+			if currentBucketTime.Equal(latestTime) {
+				stateHealthy = true
+				continue
+			}
+
+			if !stateHealthy {
 				// State changed from unhealthy to healthy on the latest bucket, trigger recovery alert
 				shouldAlert = true
 				alertReason = "Monitor has recovered and is now healthy"
@@ -387,8 +404,6 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 			}
 
 			stateHealthy = true
-			shouldAlert = false
-			return shouldAlert, "", nil
 		}
 	}
 
