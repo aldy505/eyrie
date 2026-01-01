@@ -194,7 +194,7 @@ func (w *ProcessorWorker) lookback(ctx context.Context, monitorId string, since 
 func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorical, interval time.Duration) (buckets map[time.Time][]MonitorHistorical, earliestTime time.Time, latestTime time.Time) {
 	// Earliest means the oldest time. Latest means the most recent time.
 	earliestTime = time.Now().Add(100 * 365 * 24 * time.Hour) // Far future time
-	latestTime = time.Now().Add(-100 * 365 * 24 * time.Hour)  // Far past time
+	latestTime = time.Now()
 	buckets = make(map[time.Time][]MonitorHistorical)
 
 	for _, submission := range submissions {
@@ -204,7 +204,6 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 		// Track earliest and latest time
 		// Say bucket time is 2024-01-01 10:15:00, the first comparison with the
 		// initialized earliestTime and latestTime will always update both.
-		// Track earliest and latest time
 		if bucketTime.Before(earliestTime) {
 			earliestTime = bucketTime
 		}
@@ -244,6 +243,7 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 				TimestampMinute: t,
 				Regions:         make(map[string]bool),
 			}
+			continue
 		}
 
 		// Process submissions in this bucket
@@ -301,6 +301,7 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 			}
 
 			var perRegionFailureRate = float64(rs.Failures) / float64(rs.TotalCount)
+			// TODO: Make threshold configurable
 			if perRegionFailureRate >= 0.4 {
 				// Consider this region as failed if more than 40% of submissions failed
 				submissionBucket.Regions[region] = false
@@ -341,6 +342,7 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 			continue
 		}
 
+		// TODO: Make failure rate threshold configurable
 		failureRate := float64(submissionBucket.FailureCount) / float64(submissionBucket.TotalCount)
 		if len(submissionBucket.Regions) > 1 && failureRate >= 0.5 {
 			// Unhealthy state
@@ -359,7 +361,6 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 			}
 
 			if !stateHealthy {
-				stateHealthy = false
 				shouldAlert = false
 				return shouldAlert, "", nil
 			} else {
