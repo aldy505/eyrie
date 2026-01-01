@@ -251,16 +251,65 @@ func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, bucketedSubmission
 			TimestampMinute: t,
 			Regions:         make(map[string]bool),
 			FailureCount:    0,
-			TotalCount:      len(bucketedSubmission),
+			TotalCount:      0,
 		}
 
+		// We want to accumulate the regions and failure counts.
+		// We also want to make sure that for a bucket that has multiple
+		// submissions from the same region would be counted correctly.
+		type RegionSubmission struct {
+			TotalCount int
+			Failures   int
+		}
+		var regionSubmissionCount = make(map[string]RegionSubmission)
 		for _, submission := range bucketedSubmission {
-			if !slices.Contains(monitor.ExpectedStatusCodes, submission.StatusCode) {
-				submissionBucket.Regions[submission.Region] = false
-				submissionBucket.FailureCount++
+			isSuccessful := slices.Contains(monitor.ExpectedStatusCodes, submission.StatusCode)
+			oldRegionSubmission, exists := regionSubmissionCount[submission.Region]
+
+			if !exists {
+				failures := 0
+				if !isSuccessful {
+					failures = 1
+				}
+				regionSubmissionCount[submission.Region] = RegionSubmission{TotalCount: 1, Failures: failures}
 			} else {
-				submissionBucket.Regions[submission.Region] = true
+				failures := oldRegionSubmission.Failures
+				if !isSuccessful {
+					failures++
+				}
+				regionSubmissionCount[submission.Region] = RegionSubmission{
+					TotalCount: oldRegionSubmission.TotalCount + 1,
+					Failures:   failures,
+				}
 			}
+		}
+
+		for region, rs := range regionSubmissionCount {
+			// Shall we have a little margin of error here? Like if there are 10 submissions from a region,
+			// and only 1 failed, we can still consider the region as successful?
+			if rs.Failures < rs.TotalCount {
+				// At least one success in this region
+				submissionBucket.Regions[region] = true
+				submissionBucket.TotalCount += 1
+				continue
+			} else if rs.Failures == rs.TotalCount {
+				// All failed in this region
+				submissionBucket.Regions[region] = false
+				submissionBucket.FailureCount += 1
+				submissionBucket.TotalCount += 1
+				continue
+			}
+
+			var perRegionFailureRate = float64(rs.Failures) / float64(rs.TotalCount)
+			if perRegionFailureRate >= 0.4 {
+				// Consider this region as failed if more than 40% of submissions failed
+				submissionBucket.Regions[region] = false
+				submissionBucket.FailureCount += 1
+			} else {
+				// Consider this region as successful
+				submissionBucket.Regions[region] = true
+			}
+			submissionBucket.TotalCount += 1
 		}
 
 		buckets[t] = submissionBucket
