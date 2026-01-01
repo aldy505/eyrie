@@ -2,7 +2,7 @@ FROM node:24.12.0-trixie@sha256:9fabb41bc32c72b02fd332bb6b6a17e01117d7eaa379a497
 
 WORKDIR /usr/src/eyrie
 
-COPY frontend/* .
+COPY frontend/ .
 
 RUN npm ci --loglevel=http && \
     npm run build && \
