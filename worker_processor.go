@@ -273,12 +273,10 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 			if rs.Failures == 0 {
 				// All successful submissions in this region
 				submissionBucket.Regions[region] = true
-				submissionBucket.TotalCount += 1
 			} else if rs.Failures == rs.TotalCount {
 				// All failed submissions in this region
 				submissionBucket.Regions[region] = false
 				submissionBucket.FailureCount += 1
-				submissionBucket.TotalCount += 1
 			} else {
 				// Mixed successes and failures in this region; use a failure-rate threshold.
 				perRegionFailureRate := float64(rs.Failures) / float64(rs.TotalCount)
@@ -291,8 +289,8 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 					// Consider this region as successful
 					submissionBucket.Regions[region] = true
 				}
-				submissionBucket.TotalCount += 1
 			}
+			submissionBucket.TotalCount += 1
 		}
 
 		buckets[bucketTime] = submissionBucket
@@ -330,7 +328,6 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 	}
 
 	var analyses []BucketAnalysis
-	previousState := StateHealthy
 
 	// Analyze all buckets from latest to earliest
 	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
@@ -370,11 +367,6 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 			regionNames: failedRegions,
 			isLatest:    isLatest,
 		})
-
-		// Update state tracking for next iteration
-		if !isLatest {
-			previousState = currentState
-		}
 	}
 
 	// If no data was analyzed, return no alert
@@ -384,6 +376,12 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 
 	// Now evaluate the latest bucket state against the historical state
 	latestAnalysis := analyses[0] // First element is the latest because we iterate backwards
+	
+	// Determine the previous state (the state immediately before the latest bucket)
+	var previousState HealthState = StateHealthy
+	if len(analyses) > 1 {
+		previousState = analyses[1].state
+	}
 
 	switch latestAnalysis.state {
 	case StateUnhealthyMultiRegion:
@@ -400,15 +398,13 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 
 	case StateUnhealthySingleRegion:
 		// Single-region failure in latest bucket
-		if len(analyses) > 1 {
-			// Check the previous bucket state
-			if previousState != StateHealthy {
-				// Was already unhealthy, trigger alert
-				return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from single region", 
-					latestAnalysis.failureRate*100), nil
-			}
+		// Only trigger alert if previous state was also unhealthy (single-region)
+		if previousState == StateUnhealthySingleRegion {
+			// Was already unhealthy with single region, trigger alert
+			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from single region", 
+				latestAnalysis.failureRate*100), nil
 		}
-		// Single region failure but no historical context or was healthy before
+		// Single region failure but previous state was healthy or multi-region unhealthy
 		return false, "", nil
 
 	case StateHealthy:
