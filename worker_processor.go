@@ -334,7 +334,11 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 		submissionBucket, exists := buckets[t]
 		
 		// Skip buckets with no data
-		if !exists || submissionBucket.TotalCount == 0 {
+		if !exists {
+			continue
+		}
+		
+		if submissionBucket.TotalCount == 0 {
 			continue
 		}
 
@@ -398,13 +402,14 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 
 	case StateUnhealthySingleRegion:
 		// Single-region failure in latest bucket
-		// Only trigger alert if previous state was also unhealthy (single-region)
+		// We only trigger alert for consecutive single-region failures to avoid 
+		// false positives from transient single-region issues
 		if previousState == StateUnhealthySingleRegion {
-			// Was already unhealthy with single region, trigger alert
+			// Consecutive single-region failure detected, trigger alert
 			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from single region", 
 				latestAnalysis.failureRate*100), nil
 		}
-		// Single region failure but previous state was healthy or multi-region unhealthy
+		// First occurrence of single-region failure or previous state was different
 		return false, "", nil
 
 	case StateHealthy:
