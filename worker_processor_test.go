@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestTimeSorting(t *testing.T) {
+func TestEarliestLatestTimeTracking(t *testing.T) {
 	type Submission struct {
 		CreatedAt time.Time
 	}
@@ -26,12 +26,11 @@ func TestTimeSorting(t *testing.T) {
 	for _, submission := range submissions {
 		bucketTime := submission.CreatedAt.Truncate(interval)
 
-		// Track earliest and latest time
-		// Say bucket time is 2024-01-01 10:15:00, the first comparison with the
-		// initialized earliestTime and latestTime will always update both.
+		// Track earliest and latest times: the first bucket that is earlier than
+		// earliestTime initializes earliestTime, and later buckets can update
+		// latestTime when they are after the current latestTime.
 		if bucketTime.Before(earliestTime) {
 			earliestTime = bucketTime
-			continue
 		}
 		if bucketTime.After(latestTime) {
 			latestTime = bucketTime

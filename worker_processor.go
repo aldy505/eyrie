@@ -215,9 +215,10 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 		bucketTime := submission.CreatedAt.Truncate(interval)
 		rawBuckets[bucketTime] = append(rawBuckets[bucketTime], submission)
 
-		// Track earliest and latest time
-		// Say bucket time is 2024-01-01 10:15:00, the first comparison with the
-		// initialized earliestTime and latestTime will always update both.
+		// Track earliest and latest time.
+		// Since earliestTime is initialized to a far future time, the first bucketTime
+		// will always update earliestTime. latestTime starts at time.Now() and is only
+		// updated when bucketTime is more recent than the current latestTime.
 		if bucketTime.Before(earliestTime) {
 			earliestTime = bucketTime
 		}
