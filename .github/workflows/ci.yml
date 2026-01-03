@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  frontend-lint-format:
+    name: Frontend Lint & Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: frontend-lint-format-${{ github.ref_name || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - name: Setup Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: '24.x'
+      - name: Install dependencies
+        run: |
+          npm ci --loglevel=http
+        working-directory: frontend
+      - name: Run linter
+        run: |
+          npm run lint
+        working-directory: frontend
+      - name: Run formatter check
+        run: |
+          npm run format
+        working-directory: frontend
+
+  build-binary:
+    name: Build Binary
+    strategy:
+      matrix:
+        architecture: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.architecture }}
+    timeout-minutes: 15
+    concurrency:
+      group: build-binary-${{ github.ref_name || github.sha }}-${{ matrix.architecture }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - name: Setup Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: '1.25'
+      - name: Setup Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: '24.x'
+      - name: Install frontend dependencies
+        run: |
+          npm ci --loglevel=http
+        working-directory: frontend
+      - name: Build frontend
+        run: |
+          npm run build
+        working-directory: frontend
+      - name: Build backend
+        run: |
+          go build -o eyrie \
+          -ldflags="-s -w -X 'main.Version=$(git describe --tags --always --dirty)'" \
+          .
+      - name: Upload to GitHub Artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'aldy505' }}
+        with:
+          name: eyrie-${{ matrix.architecture == 'ubuntu-24.04' && 'linux-amd64' || 'linux-arm64' }}
+          path: eyrie
+          if-no-files-found: error
+          retention-days: 30
+
+  build-docker-image:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: build-docker-image-${{ github.ref_name || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Login to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'aldy505' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=semver,pattern={{version}}
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          push: ${{ github.event_name != 'pull_request' && github.repository_owner == 'aldy505' }}
+          platforms: linux/amd64,linux/arm64
+          context: .
+          file: ./Dockerfile
+          provenance: ${{ github.event_name != 'pull_request' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
