@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -48,11 +49,17 @@ func NewServer(options ServerOptions) (*Server, error) {
 		ingesterProducer:  options.IngesterProducer,
 	}
 
+	// Create a sub-filesystem rooted at frontend/dist so we can reference index.html directly
+	distFS, err := fs.Sub(frontendFilesystem, "frontend/dist")
+	if err != nil {
+		return nil, fmt.Errorf("creating sub-filesystem: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /uptime-data", s.UptimeDataHandler)
 	mux.HandleFunc("POST /checker/register", s.CheckerRegistration)
 	mux.HandleFunc("POST /checker/submit", s.CheckerSubmission)
-	mux.Handle("/", SpaHandler(frontendFilesystem, "index.html"))
+	mux.Handle("/", SpaHandler(distFS, "index.html"))
 
 	srv := &http.Server{
 		Addr:    net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
