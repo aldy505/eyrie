@@ -102,7 +102,7 @@ func (w *ProcessorWorker) Start() error {
 
 			// Group submissions by minute buckets and pre-process statistics.
 			minuteInterval := time.Minute
-			buckets, latestTime, earliestTime := w.groupSubmissionByMinute(historicalSubmissions, minuteInterval, monitor)
+			buckets, earliestTime, latestTime := w.groupSubmissionByMinute(historicalSubmissions, minuteInterval, monitor)
 
 			// Once we group the submission by minute, we can analyze whether there is a widespread failure.
 			// We can start tracking from `latestTime` to `earliestTime` using the minute interval.
@@ -203,11 +203,11 @@ type SubmissionBucket struct {
 	TotalCount int
 }
 
-func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorical, interval time.Duration, monitor Monitor) (buckets map[time.Time]*SubmissionBucket, earliestTime time.Time, latestTime time.Time) {
+func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorical, interval time.Duration, monitor Monitor) (buckets map[time.Time]SubmissionBucket, earliestTime time.Time, latestTime time.Time) {
 	// Earliest means the oldest time. Latest means the most recent time.
-	earliestTime = time.Now().Add(100 * 365 * 24 * time.Hour) // Far future time
-	latestTime = time.Now()
-	
+	earliestTime = time.Now().UTC().Add(100 * 365 * 24 * time.Hour) // Far future time
+	latestTime = time.Now().UTC().Add(-100 * 365 * 24 * time.Hour)
+
 	// First, group raw submissions by time bucket
 	rawBuckets := make(map[time.Time][]MonitorHistorical)
 
@@ -228,10 +228,10 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 	}
 
 	// Now pre-process each bucket to calculate statistics
-	buckets = make(map[time.Time]*SubmissionBucket)
-	
+	buckets = make(map[time.Time]SubmissionBucket)
+
 	for bucketTime, bucketSubmissions := range rawBuckets {
-		submissionBucket := &SubmissionBucket{
+		submissionBucket := SubmissionBucket{
 			TimestampMinute: bucketTime,
 			Regions:         make(map[string]bool),
 			FailureCount:    0,
@@ -246,7 +246,7 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 			Failures   int
 		}
 		regionSubmissionCount := make(map[string]RegionSubmission)
-		
+
 		for _, submission := range bucketSubmissions {
 			isSuccessful := slices.Contains(monitor.ExpectedStatusCodes, submission.StatusCode)
 			oldRegionSubmission, exists := regionSubmissionCount[submission.Region]
@@ -300,7 +300,7 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 	return buckets, earliestTime, latestTime
 }
 
-func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (shouldAlert bool, alertReason string, err error) {
+func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (shouldAlert bool, alertReason string, err error) {
 	// We analyze the buckets to see if there is a widespread failure,
 	// starting from the latestTime to earliestTime.
 	// If the state changes from healthy to unhealthy for the latest bucket,
@@ -320,12 +320,12 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 
 	// Track state transitions through the time series
 	type BucketAnalysis struct {
-		bucketTime   time.Time
-		state        HealthState
-		failureRate  float64
-		regionCount  int
-		regionNames  []string
-		isLatest     bool
+		bucketTime  time.Time
+		state       HealthState
+		failureRate float64
+		regionCount int
+		regionNames []string
+		isLatest    bool
 	}
 
 	var analyses []BucketAnalysis
@@ -333,12 +333,12 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 	// Analyze all buckets from latest to earliest
 	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
 		submissionBucket, exists := buckets[t]
-		
+
 		// Skip buckets with no data
 		if !exists {
 			continue
 		}
-		
+
 		if submissionBucket.TotalCount == 0 {
 			continue
 		}
@@ -381,7 +381,7 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 
 	// Now evaluate the latest bucket state against the historical state
 	latestAnalysis := analyses[0] // First element is the latest because we iterate backwards
-	
+
 	// Determine the previous state (the state immediately before the latest bucket)
 	var previousState HealthState = StateHealthy
 	if len(analyses) > 1 {
@@ -393,9 +393,9 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 		// Multi-region failure in latest bucket
 		if previousState == StateHealthy {
 			// State changed from healthy to unhealthy - trigger alert
-			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from %d regions (%s)", 
-				latestAnalysis.failureRate*100, 
-				latestAnalysis.regionCount, 
+			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from %d regions (%s)",
+				latestAnalysis.failureRate*100,
+				latestAnalysis.regionCount,
 				strings.Join(latestAnalysis.regionNames, ", ")), nil
 		}
 		// Already unhealthy, no alert
@@ -403,11 +403,11 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]*SubmissionBu
 
 	case StateUnhealthySingleRegion:
 		// Single-region failure in latest bucket
-		// We only trigger alert for consecutive single-region failures to avoid 
+		// We only trigger alert for consecutive single-region failures to avoid
 		// false positives from transient single-region issues
 		if previousState == StateUnhealthySingleRegion {
 			// Consecutive single-region failure detected, trigger alert
-			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from single region", 
+			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from single region",
 				latestAnalysis.failureRate*100), nil
 		}
 		// First occurrence of single-region failure or previous state was different

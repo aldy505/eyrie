@@ -11,9 +11,9 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/duckdb/duckdb-go/v2"
 	"github.com/goccy/go-yaml"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/marcboeker/go-duckdb/v2"
 	"gocloud.dev/pubsub"
 
 	_ "gocloud.dev/pubsub/kafkapubsub"
