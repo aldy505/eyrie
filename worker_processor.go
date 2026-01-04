@@ -330,6 +330,17 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBuc
 
 	var analyses []BucketAnalysis
 
+	// Safeguard against invalid input that could cause a non-terminating loop.
+	// We expect earliestTime <= latestTime and a positive minuteInterval so that
+	// iterating with t = t.Add(-minuteInterval) makes progress toward earliestTime.
+	if earliestTime.After(latestTime) || minuteInterval <= 0 {
+		slog.Warn("analyzeSubmissions: invalid time range or minute interval; skipping analysis",
+			slog.String("earliest_time", earliestTime.String()),
+			slog.String("latest_time", latestTime.String()),
+			slog.Duration("minute_interval", minuteInterval))
+		return false, "", nil
+	}
+
 	// Analyze all buckets from latest to earliest
 	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
 		submissionBucket, exists := buckets[t]
