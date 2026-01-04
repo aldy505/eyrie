@@ -7,6 +7,20 @@ on:
   pull_request:
 
 jobs:
+  security-trufflehog:
+    name: Security Scan with TruffleHog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: security-trufflehog-${{ github.ref_name || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+      - uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --results=verified,unknown
   frontend-lint-format:
     name: Frontend Lint & Format
     runs-on: ubuntu-latest
