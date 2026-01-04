@@ -58,7 +58,6 @@ func (ct *CheckerTracer) GetClientTrace() *httptrace.ClientTrace {
 			ct.dnsDoneTime = time.Now()
 			ct.Unlock()
 		},
-
 		TLSHandshakeStart: func() {
 			ct.Lock()
 			ct.tlsHandshakeStartTime = time.Now()
