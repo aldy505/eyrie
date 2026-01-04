@@ -61,6 +61,14 @@ jobs:
         run: |
           npm run build
         working-directory: frontend
+      - name: Run tests
+        run: |
+          go test -v -race -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Upload coverage report
+        if: ${{ matrix.architecture == 'ubuntu-24.04' }}
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Build backend
         run: |
           go build -o eyrie \

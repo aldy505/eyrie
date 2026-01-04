@@ -90,6 +90,7 @@ func (w *ProcessorWorker) Start() error {
 
 			// We look at the recent submissions, from similar time period (e.g., last 5 minutes) but from different regions.
 			// If we see a significant number of failures from multiple regions, we trigger an alert.
+			// TODO: Make the lookback duration configurable.
 			lookbackSince := time.Now().Add(-5 * time.Minute)
 			historicalSubmissions, err := w.lookback(ctx, request.MonitorID, lookbackSince)
 			if err != nil {
@@ -99,8 +100,17 @@ func (w *ProcessorWorker) Start() error {
 				continue
 			}
 
-			// Analyze the historical submissions along with the current one to determine if an alert should be sent.
-			shouldAlert, alertReason, err := w.analyzeSubmissions(monitor, historicalSubmissions, request, region)
+			// Group submissions by minute buckets and pre-process statistics.
+			minuteInterval := time.Minute
+			buckets, earliestTime, latestTime := w.groupSubmissionByMinute(historicalSubmissions, minuteInterval, monitor)
+
+			// Once we group the submission by minute, we can analyze whether there is a widespread failure.
+			// We can start tracking from `latestTime` to `earliestTime` using the minute interval.
+			// If a bucket is missing, we take that as zero submissions for that minute.
+			// Later, if on a certain bucket, there are > 50% failures from multiple regions, we trigger an alert.
+
+			// Analyze the pre-processed buckets to determine if an alert should be sent.
+			shouldAlert, alertReason, err := w.analyzeSubmissions(buckets, latestTime, earliestTime, minuteInterval)
 			if err != nil {
 				slog.ErrorContext(ctx, "analyzing submissions for alerting", slog.String("error", err.Error()))
 				message.Ack()
@@ -181,74 +191,249 @@ func (w *ProcessorWorker) lookback(ctx context.Context, monitorId string, since 
 	return results, nil
 }
 
-func (w *ProcessorWorker) analyzeSubmissions(monitor Monitor, historicalSubmissions []MonitorHistorical, currentSubmission CheckerSubmissionRequest, currentRegion string) (bool, string, error) {
-	// We group each submission by date time bucket (e.g., minute).
-	// For each bucket, we can see if the failures is coming from multiple regions.
-	// If yes, we check whether the current submission is also a failure.
-	// If yes, we trigger an alert.
+// SubmissionBucket represents aggregated submission data for a time bucket
+type SubmissionBucket struct {
+	TimestampMinute time.Time
+	// Regions keeps track of unique regions in this bucket.
+	// The value of the map represents whether the region has a successful check.
+	Regions map[string]bool
+	// FailureCount counts the number of regions that are considered failed
+	FailureCount int
+	// TotalCount counts the total number of regions in this bucket
+	TotalCount int
+}
 
-	type SubmissionBucket struct {
-		TimestampMinute time.Time
-		Regions         map[string]bool
-		FailureCount    int
-		TotalCount      int
+func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorical, interval time.Duration, monitor Monitor) (buckets map[time.Time]SubmissionBucket, earliestTime time.Time, latestTime time.Time) {
+	// Earliest means the oldest time. Latest means the most recent time.
+	earliestTime = time.Now().UTC().Add(100 * 365 * 24 * time.Hour) // Far future time
+	latestTime = time.Now().UTC().Add(-100 * 365 * 24 * time.Hour)
+
+	// First, group raw submissions by time bucket
+	rawBuckets := make(map[time.Time][]MonitorHistorical)
+
+	for _, submission := range submissions {
+		bucketTime := submission.CreatedAt.Truncate(interval)
+		rawBuckets[bucketTime] = append(rawBuckets[bucketTime], submission)
+
+		// Track earliest and latest time.
+		// Since earliestTime is initialized to a far future time, the first bucketTime
+		// will always update earliestTime. latestTime starts at time.Now() and is only
+		// updated when bucketTime is more recent than the current latestTime.
+		if bucketTime.Before(earliestTime) {
+			earliestTime = bucketTime
+		}
+		if bucketTime.After(latestTime) {
+			latestTime = bucketTime
+		}
 	}
 
-	buckets := make(map[time.Time]*SubmissionBucket)
+	// Now pre-process each bucket to calculate statistics
+	buckets = make(map[time.Time]SubmissionBucket)
 
-	// Process historical submissions
-	for _, submission := range historicalSubmissions {
-		bucketTime := submission.CreatedAt.Truncate(time.Minute)
-		if _, exists := buckets[bucketTime]; !exists {
-			buckets[bucketTime] = &SubmissionBucket{
-				TimestampMinute: bucketTime,
-				Regions:         make(map[string]bool),
+	for bucketTime, bucketSubmissions := range rawBuckets {
+		submissionBucket := SubmissionBucket{
+			TimestampMinute: bucketTime,
+			Regions:         make(map[string]bool),
+			FailureCount:    0,
+			TotalCount:      0,
+		}
+
+		// We want to accumulate the regions and failure counts.
+		// We also want to make sure that for a bucket that has multiple
+		// submissions from the same region would be counted correctly.
+		type RegionSubmission struct {
+			TotalCount int
+			Failures   int
+		}
+		regionSubmissionCount := make(map[string]RegionSubmission)
+
+		for _, submission := range bucketSubmissions {
+			isSuccessful := slices.Contains(monitor.ExpectedStatusCodes, submission.StatusCode)
+			oldRegionSubmission, exists := regionSubmissionCount[submission.Region]
+
+			if !exists {
+				failures := 0
+				if !isSuccessful {
+					failures = 1
+				}
+				regionSubmissionCount[submission.Region] = RegionSubmission{TotalCount: 1, Failures: failures}
+			} else {
+				failures := oldRegionSubmission.Failures
+				if !isSuccessful {
+					failures++
+				}
+				regionSubmissionCount[submission.Region] = RegionSubmission{
+					TotalCount: oldRegionSubmission.TotalCount + 1,
+					Failures:   failures,
+				}
 			}
 		}
-		bucket := buckets[bucketTime]
-		bucket.TotalCount++
-		bucket.Regions[submission.Region] = true
-		if !slices.Contains(monitor.ExpectedStatusCodes, submission.StatusCode) {
-			bucket.FailureCount++
+
+		// Now process each region's aggregated data
+		for region, rs := range regionSubmissionCount {
+			if rs.Failures == 0 {
+				// All successful submissions in this region
+				submissionBucket.Regions[region] = true
+			} else if rs.Failures == rs.TotalCount {
+				// All failed submissions in this region
+				submissionBucket.Regions[region] = false
+				submissionBucket.FailureCount += 1
+			} else {
+				// Mixed successes and failures in this region; use a failure-rate threshold.
+				perRegionFailureRate := float64(rs.Failures) / float64(rs.TotalCount)
+				// TODO: Make threshold configurable
+				if perRegionFailureRate >= 0.4 {
+					// Consider this region as failed if 40% or more of submissions failed
+					submissionBucket.Regions[region] = false
+					submissionBucket.FailureCount += 1
+				} else {
+					// Consider this region as successful
+					submissionBucket.Regions[region] = true
+				}
+			}
+			submissionBucket.TotalCount += 1
 		}
+
+		buckets[bucketTime] = submissionBucket
 	}
 
-	// Process current submission
-	currentBucketTime := currentSubmission.Timestamp.Truncate(time.Minute)
-	if _, exists := buckets[currentBucketTime]; !exists {
-		buckets[currentBucketTime] = &SubmissionBucket{
-			TimestampMinute: currentBucketTime,
-			Regions:         make(map[string]bool),
-		}
-	}
-	currentBucket := buckets[currentBucketTime]
-	currentBucket.TotalCount++
-	currentBucket.Regions[currentRegion] = true
-	if !slices.Contains(monitor.ExpectedStatusCodes, currentSubmission.StatusCode) {
-		currentBucket.FailureCount++
+	return buckets, earliestTime, latestTime
+}
+
+func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (shouldAlert bool, alertReason string, err error) {
+	// We analyze the buckets to see if there is a widespread failure,
+	// starting from the latestTime to earliestTime.
+	// If the state changes from healthy to unhealthy for the latest bucket,
+	// we trigger an alert. And vice versa, if the state changes from unhealthy
+	// to healthy for the latest bucket, we can also trigger a recovery alert.
+	// But, if there is no state change, we do nothing.
+	//
+	// We still need to iterate through all buckets from the latestTime because
+	// we can't know for sure if there are buckets with 0 TotalCount in between.
+
+	type HealthState int
+	const (
+		StateHealthy HealthState = iota
+		StateUnhealthyMultiRegion
+		StateUnhealthySingleRegion
+	)
+
+	// Track state transitions through the time series
+	type BucketAnalysis struct {
+		bucketTime  time.Time
+		state       HealthState
+		failureRate float64
+		regionCount int
+		regionNames []string
+		isLatest    bool
 	}
 
-	// Analyze buckets to determine if an alert should be sent
-	// Also handle if there is only one region on a bucket, it should not trigger an alert.
-	// Only react to the latest bucket (current submission's bucket)
-	latestBucket, exists := buckets[currentBucketTime]
-	if !exists {
+	var analyses []BucketAnalysis
+
+	// Safeguard against invalid input that could cause a non-terminating loop.
+	// We expect earliestTime <= latestTime and a positive minuteInterval so that
+	// iterating with t = t.Add(-minuteInterval) makes progress toward earliestTime.
+	if earliestTime.After(latestTime) || minuteInterval <= 0 {
+		slog.Warn("analyzeSubmissions: invalid time range or minute interval; skipping analysis",
+			slog.String("earliest_time", earliestTime.String()),
+			slog.String("latest_time", latestTime.String()),
+			slog.Duration("minute_interval", minuteInterval))
 		return false, "", nil
 	}
 
-	if latestBucket.TotalCount == 0 {
+	// Analyze all buckets from latest to earliest
+	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
+		submissionBucket, exists := buckets[t]
+
+		// Skip buckets with no data
+		if !exists {
+			continue
+		}
+
+		if submissionBucket.TotalCount == 0 {
+			continue
+		}
+
+		isLatest := t.Equal(latestTime)
+		failureRate := float64(submissionBucket.FailureCount) / float64(submissionBucket.TotalCount)
+		regionCount := len(submissionBucket.Regions)
+
+		var currentState HealthState
+		var failedRegions []string
+
+		// Determine the health state for this bucket
+		if regionCount > 1 && failureRate >= 0.5 {
+			currentState = StateUnhealthyMultiRegion
+			for region, success := range submissionBucket.Regions {
+				if !success {
+					failedRegions = append(failedRegions, region)
+				}
+			}
+		} else if regionCount == 1 && failureRate >= 0.5 {
+			currentState = StateUnhealthySingleRegion
+		} else {
+			currentState = StateHealthy
+		}
+
+		analyses = append(analyses, BucketAnalysis{
+			bucketTime:  t,
+			state:       currentState,
+			failureRate: failureRate,
+			regionCount: regionCount,
+			regionNames: failedRegions,
+			isLatest:    isLatest,
+		})
+	}
+
+	// If no data was analyzed, return no alert
+	if len(analyses) == 0 {
 		return false, "", nil
 	}
 
-	failureRate := float64(latestBucket.FailureCount) / float64(latestBucket.TotalCount)
-	if len(latestBucket.Regions) > 1 && failureRate >= 0.5 {
-		regionNames := make([]string, 0, len(latestBucket.Regions))
-		for region := range latestBucket.Regions {
-			regionNames = append(regionNames, region)
-		}
-		alertReason := fmt.Sprintf("High failure rate detected: %.2f%% failures from %d regions (%s)", failureRate*100, len(latestBucket.Regions), strings.Join(regionNames, ", "))
-		return true, alertReason, nil
+	// Now evaluate the latest bucket state against the historical state
+	latestAnalysis := analyses[0] // First element is the latest because we iterate backwards
+
+	// Determine the previous state (the state immediately before the latest bucket)
+	var previousState HealthState = StateHealthy
+	if len(analyses) > 1 {
+		previousState = analyses[1].state
 	}
 
+	switch latestAnalysis.state {
+	case StateUnhealthyMultiRegion:
+		// Multi-region failure in latest bucket
+		if previousState == StateHealthy {
+			// State changed from healthy to unhealthy - trigger alert
+			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from %d regions (%s)",
+				latestAnalysis.failureRate*100,
+				latestAnalysis.regionCount,
+				strings.Join(latestAnalysis.regionNames, ", ")), nil
+		}
+		// Already unhealthy, no alert
+		return false, "", nil
+
+	case StateUnhealthySingleRegion:
+		// Single-region failure in latest bucket
+		// We only trigger alert for consecutive single-region failures to avoid
+		// false positives from transient single-region issues
+		if previousState == StateUnhealthySingleRegion {
+			// Consecutive single-region failure detected, trigger alert
+			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from single region",
+				latestAnalysis.failureRate*100), nil
+		}
+		// First occurrence of single-region failure or previous state was different
+		return false, "", nil
+
+	case StateHealthy:
+		// Latest bucket is healthy
+		if previousState != StateHealthy {
+			// State changed from unhealthy to healthy - trigger recovery alert
+			return true, "Monitor has recovered and is now healthy", nil
+		}
+		// Was already healthy, no alert
+		return false, "", nil
+	}
+
+	// Default: no alert
 	return false, "", nil
 }
