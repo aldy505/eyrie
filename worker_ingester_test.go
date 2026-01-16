@@ -228,7 +228,9 @@ func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 
 	// Verify updated values
 	// New total: 15 records
-	// Latencies: 100,200,300,400,500,600,700,800,900,1000,50,50,50,50,50 = 5750
+	// Original latencies: 100+200+300+400+500+600+700+800+900+1000 = 5500
+	// Additional latencies: 50*5 = 250
+	// Total: 5500 + 250 = 5750
 	// AVG: 5750/15 = 383.33... -> 383 (integer)
 	// MIN: 50
 	// MAX: 1000
