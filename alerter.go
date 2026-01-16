@@ -14,9 +14,11 @@ var ErrAlerterNotConfigured = errors.New("alerter not configured")
 // and cannot send additional alerts until the rate limit period has passed.
 var ErrAlerterRateLimited = errors.New("alerter rate limited")
 
-// ErrAlerterDropped is returned when an alert message cannot be sent
-// because the alerter's message queue is full and the message was dropped
-// to prevent blocking.
+// ErrAlerterDropped is returned when an alert message cannot be successfully
+// delivered by the alerter. This may occur, for example, if the alerter's
+// internal message queue is full and the message is dropped to prevent
+// blocking, or if a downstream delivery mechanism (such as a webhook) returns
+// a non-2xx HTTP response.
 var ErrAlerterDropped = errors.New("alerter message dropped")
 
 // Alerter defines an interface for sending alerts when a monitor detects an issue.
