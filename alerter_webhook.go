@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -62,6 +63,7 @@ func (w *WebhookAlerter) Send(ctx context.Context, monitor Monitor, reason strin
 	}
 	defer func() {
 		if response.Body != nil {
+			_, _ = io.Copy(io.Discard, response.Body)
 			_ = response.Body.Close()
 		}
 	}()
