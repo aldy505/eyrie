@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"gocloud.dev/pubsub"
 )
 
@@ -39,7 +40,7 @@ func (w *ProcessorWorker) Start() error {
 		case <-w.shutdown:
 			return nil
 		default:
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
 
 			message, err := w.subscriber.Receive(ctx)
 			if err != nil {
@@ -48,6 +49,9 @@ func (w *ProcessorWorker) Start() error {
 				cancel()
 				continue
 			}
+
+			span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Processor Worker Start"))
+			ctx = span.Context()
 
 			// Process the message here.
 			var request CheckerSubmissionRequest
@@ -59,6 +63,7 @@ func (w *ProcessorWorker) Start() error {
 					message.Ack()
 				}
 				cancel()
+				span.Finish()
 				continue
 			}
 
@@ -79,10 +84,23 @@ func (w *ProcessorWorker) Start() error {
 				}
 			}
 
+			span.SetData("eyrie.monitor_id", request.MonitorID)
+			span.SetData("eyrie.region", region)
+			if hub := sentry.GetHubFromContext(ctx); hub != nil {
+				hub.Scope().SetTag("eyrie.monitor_id", request.MonitorID)
+				hub.Scope().SetTag("eyrie.region", region)
+			}
+
 			if !monitorFound {
+				if hub := sentry.GetHubFromContext(ctx); hub != nil {
+					hub.Scope().SetLevel(sentry.LevelWarning)
+					hub.CaptureMessage(fmt.Sprintf("Monitor not found for submission: %s", request.MonitorID))
+				}
+
 				slog.ErrorContext(ctx, "monitor not found for submission", slog.String("region", region), slog.String("monitor_id", request.MonitorID))
 				message.Ack()
 				cancel()
+				span.Finish()
 				continue
 			}
 
@@ -94,9 +112,13 @@ func (w *ProcessorWorker) Start() error {
 			lookbackSince := time.Now().Add(-5 * time.Minute)
 			historicalSubmissions, err := w.lookback(ctx, request.MonitorID, lookbackSince)
 			if err != nil {
+				if hub := sentry.GetHubFromContext(ctx); hub != nil {
+					hub.CaptureException(fmt.Errorf("looking back historical submissions for monitor %s: %w", request.MonitorID, err))
+				}
 				slog.ErrorContext(ctx, "looking back historical submissions", slog.String("error", err.Error()))
 				message.Ack()
 				cancel()
+				span.Finish()
 				continue
 			}
 
@@ -112,9 +134,13 @@ func (w *ProcessorWorker) Start() error {
 			// Analyze the pre-processed buckets to determine if an alert should be sent.
 			shouldAlert, alertReason, err := w.analyzeSubmissions(buckets, latestTime, earliestTime, minuteInterval)
 			if err != nil {
+				if hub := sentry.GetHubFromContext(ctx); hub != nil {
+					hub.CaptureException(fmt.Errorf("analyzing submissions for monitor %s: %w", request.MonitorID, err))
+				}
 				slog.ErrorContext(ctx, "analyzing submissions for alerting", slog.String("error", err.Error()))
 				message.Ack()
 				cancel()
+				span.Finish()
 				continue
 			}
 
@@ -130,9 +156,13 @@ func (w *ProcessorWorker) Start() error {
 
 				alertBody, err := json.Marshal(alert)
 				if err != nil {
+					if hub := sentry.GetHubFromContext(ctx); hub != nil {
+						hub.CaptureException(fmt.Errorf("marshaling alert message for monitor %s: %w", request.MonitorID, err))
+					}
 					slog.ErrorContext(ctx, "marshaling alert message", slog.String("error", err.Error()))
 					message.Ack()
 					cancel()
+					span.Finish()
 					continue
 				}
 
@@ -143,9 +173,13 @@ func (w *ProcessorWorker) Start() error {
 					},
 				})
 				if err != nil {
+					if hub := sentry.GetHubFromContext(ctx); hub != nil {
+						hub.CaptureException(fmt.Errorf("sending alert message for monitor %s: %w", request.MonitorID, err))
+					}
 					slog.ErrorContext(ctx, "sending alert message", slog.String("error", err.Error()))
 					message.Ack()
 					cancel()
+					span.Finish()
 					continue
 				}
 			}
@@ -153,6 +187,7 @@ func (w *ProcessorWorker) Start() error {
 			// Acknowledge the message after processing.
 			message.Ack()
 			cancel()
+			span.Finish()
 		}
 	}
 }
@@ -163,6 +198,10 @@ func (w *ProcessorWorker) Stop() error {
 }
 
 func (w *ProcessorWorker) lookback(ctx context.Context, monitorId string, since time.Time) ([]MonitorHistorical, error) {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Lookback Monitor Historical"))
+	ctx = span.Context()
+	defer span.Finish()
+
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("getting db connection: %w", err)

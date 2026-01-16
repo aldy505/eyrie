@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/getsentry/sentry-go"
 )
 
 type WebhookAlerter struct {
@@ -31,6 +33,10 @@ type webhookRequestPayload struct {
 }
 
 func (w *WebhookAlerter) Send(ctx context.Context, monitor Monitor, reason string, occurredAt time.Time) error {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Webhook Alerter Send"))
+	ctx = span.Context()
+	defer span.Finish()
+
 	requestBody, err := json.Marshal(webhookRequestPayload{
 		Message: fmt.Sprintf("Alert for monitor '%s': %s at %s", monitor.Name, reason, occurredAt.Format(time.RFC3339)),
 	})

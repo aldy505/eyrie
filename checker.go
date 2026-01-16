@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/guregu/null/v5"
 	"golang.org/x/sync/semaphore"
 )
@@ -68,6 +69,8 @@ REGISTER_UPSTREAM:
 	c.nextUpstreamFetch = &nextUpstreamFetch
 
 	for {
+		ctx := sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
+
 		select {
 		case <-c.shutdown:
 			return nil
@@ -94,6 +97,8 @@ REGISTER_UPSTREAM:
 					continue
 				}
 
+				span := sentry.StartSpan(checkerCtx, "function", sentry.WithDescription("Perform Monitor Checks"))
+				ctx = span.Context()
 				slog.InfoContext(ctx, "performing checks for monitors", slog.Int("monitor_count", len(c.monitors.Monitors)))
 				s := semaphore.NewWeighted(10) // Limit to 10 concurrent checks
 				wg := sync.WaitGroup{}
@@ -116,6 +121,7 @@ REGISTER_UPSTREAM:
 				}
 
 				wg.Wait()
+				span.Finish()
 				checkerCancel()
 			}
 
@@ -155,6 +161,10 @@ func (c *Checker) Stop() error {
 var ErrCheckerRegistrationFailed = fmt.Errorf("checker registration failed")
 
 func (c *Checker) registerToUpstream(ctx context.Context) error {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Register Checker to upstream"))
+	ctx = span.Context()
+	defer span.Finish()
+
 	requestUrl, err := url.JoinPath(c.config.UpstreamURL, "/checker/register")
 	if err != nil {
 		return fmt.Errorf("joining upstream URL: %w", err)
@@ -205,6 +215,10 @@ func (c *Checker) performMonitorCheck(ctx context.Context, monitor Monitor) erro
 	// is handled in the main loop.
 	// Otherwise, if the interval is 5 minutes, we may only perform the check at every 5th minute.
 	// This is to reduce the load on both the checker and the upstream server.
+
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Perform Monitor Check"))
+	ctx = span.Context()
+	defer span.Finish()
 
 	parsedInterval, err := time.ParseDuration(monitor.Interval)
 	if err != nil {
@@ -319,6 +333,11 @@ func (c *Checker) performMonitorCheck(ctx context.Context, monitor Monitor) erro
 }
 
 func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerSubmissionRequest) {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Send Monitor Submission"))
+	ctx = span.Context()
+	defer span.Finish()
+
+	// We don't want the submission to be cancelled if the parent context is cancelled.
 	ctx = context.WithoutCancel(ctx)
 
 	submissionBody, err := json.Marshal(submission)
