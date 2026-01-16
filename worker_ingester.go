@@ -162,12 +162,12 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 		SELECT
 			monitor_id,
 			DATE(created_at) AS date,
-			AVG(latency_ms) AS avg_latency_ms,
+			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
 			MIN(latency_ms) AS min_latency_ms,
 			MAX(latency_ms) AS max_latency_ms,
-			(SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END)::FLOAT / COUNT(*) * 100)::SMALLINT AS success_rate
+			CAST(CAST(SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
 		FROM monitor_historical
-		WHERE monitor_id = $1 AND DATE(created_at) = $2
+		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
 		GROUP BY monitor_id, DATE(created_at)
 		ON CONFLICT (monitor_id, date) DO UPDATE
 		SET
