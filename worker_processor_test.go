@@ -59,6 +59,10 @@ func TestProcessorWorker_GroupSubmissionByMinute(t *testing.T) {
 		alerterProducer: nil,
 		shutdown:        make(chan struct{}),
 		monitorConfig:   MonitorConfig{},
+		datasetConfig: DatasetConfig{
+			PerRegionFailureThresholdPercent: 40.0,
+			FailureThresholdPercent:          50.0,
+		},
 	}
 
 	const monitorId = "1"
@@ -565,6 +569,10 @@ func TestProcessorWorker_AnalyzeSubmissions(t *testing.T) {
 		alerterProducer: nil,
 		shutdown:        make(chan struct{}),
 		monitorConfig:   MonitorConfig{},
+		datasetConfig: DatasetConfig{
+			PerRegionFailureThresholdPercent: 40.0,
+			FailureThresholdPercent:          50.0,
+		},
 	}
 
 	baseTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
