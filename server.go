@@ -182,25 +182,29 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var uptimeDataHandlerMonitorGroup []UptimeDataHandlerMonitorGroup
 
+	// Build an index for monitor metadata to avoid O(n*m) lookups
+	monitorIndexByID := make(map[string]int, len(monitorMetadata))
+	for i, monitor := range monitorMetadata {
+		monitorIndexByID[monitor.ID] = i
+	}
+
 	// Prioritize group first
 	for _, group := range s.monitorConfig.Groups {
 		var groupMonitors []UptimeDataHandlerSingleMonitor
 		for _, monitorId := range group.MonitorIDs {
 			slog.InfoContext(ctx, "Trying to find monitor id: "+monitorId)
-			for _, monitor := range monitorMetadata {
-				if monitor.ID == monitorId {
-					slog.InfoContext(ctx, "Found monitor ID "+monitor.ID+" for group ID "+group.ID)
-					if historical, exists := m[monitor.ID]; exists {
-						groupMonitors = append(groupMonitors, UptimeDataHandlerSingleMonitor{
-							ID:             monitor.ID,
-							Name:           monitor.Name,
-							Description:    monitor.Description,
-							ResponseTimeMs: historical.LatencyMs,
-							Age:            historical.MonitorAge,
-							Downtimes:      historical.DailyDowntimes,
-						})
-					}
-					break
+			if idx, ok := monitorIndexByID[monitorId]; ok {
+				monitor := monitorMetadata[idx]
+				slog.InfoContext(ctx, "Found monitor ID "+monitor.ID+" for group ID "+group.ID)
+				if historical, exists := m[monitor.ID]; exists {
+					groupMonitors = append(groupMonitors, UptimeDataHandlerSingleMonitor{
+						ID:             monitor.ID,
+						Name:           monitor.Name,
+						Description:    monitor.Description,
+						ResponseTimeMs: historical.LatencyMs,
+						Age:            historical.MonitorAge,
+						Downtimes:      historical.DailyDowntimes,
+					})
 				}
 			}
 		}
