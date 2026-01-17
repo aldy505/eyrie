@@ -7,6 +7,7 @@ import (
 type Monitor struct {
 	ID                  string            `yaml:"id" json:"id"`
 	Name                string            `yaml:"name" json:"name"`
+	Description         null.String       `yaml:"description" json:"description"`
 	Interval            string            `yaml:"interval" json:"interval" default:"1m"`
 	Method              string            `yaml:"method" json:"method" default:"GET"`
 	SkipTLSVerify       bool              `yaml:"skip_tls_verify" json:"skip_tls_verify" default:"false"`
@@ -17,6 +18,14 @@ type Monitor struct {
 	JqAssertion         null.String       `yaml:"jq_assertion" json:"-"`
 }
 
+type Group struct {
+	ID          string      `yaml:"id" json:"id"`
+	Name        string      `yaml:"name" json:"name"`
+	Description null.String `yaml:"description" json:"description"`
+	MonitorIDs  []string    `yaml:"monitor_ids" json:"monitor_ids"`
+}
+
 type MonitorConfig struct {
 	Monitors []Monitor `yaml:"monitors"`
+	Groups   []Group   `yaml:"groups"`
 }

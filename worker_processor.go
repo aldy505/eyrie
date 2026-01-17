@@ -20,15 +20,17 @@ type ProcessorWorker struct {
 	alerterProducer *pubsub.Topic
 	shutdown        chan struct{}
 	monitorConfig   MonitorConfig
+	datasetConfig   DatasetConfig
 }
 
-func NewProcessorWorker(db *sql.DB, subscriber *pubsub.Subscription, alerterProducer *pubsub.Topic, monitorConfig MonitorConfig) *ProcessorWorker {
+func NewProcessorWorker(db *sql.DB, subscriber *pubsub.Subscription, alerterProducer *pubsub.Topic, monitorConfig MonitorConfig, datasetConfig DatasetConfig) *ProcessorWorker {
 	return &ProcessorWorker{
 		db:              db,
 		subscriber:      subscriber,
 		alerterProducer: alerterProducer,
 		shutdown:        make(chan struct{}),
 		monitorConfig:   monitorConfig,
+		datasetConfig:   datasetConfig,
 	}
 }
 
@@ -108,8 +110,7 @@ func (w *ProcessorWorker) Start() error {
 
 			// We look at the recent submissions, from similar time period (e.g., last 5 minutes) but from different regions.
 			// If we see a significant number of failures from multiple regions, we trigger an alert.
-			// TODO: Make the lookback duration configurable.
-			lookbackSince := time.Now().Add(-5 * time.Minute)
+			lookbackSince := time.Now().Add(-time.Duration(w.datasetConfig.ProcessingLookbackMinutes) * time.Minute)
 			historicalSubmissions, err := w.lookback(ctx, request.MonitorID, lookbackSince)
 			if err != nil {
 				if hub := sentry.GetHubFromContext(ctx); hub != nil {
@@ -320,8 +321,7 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 			} else {
 				// Mixed successes and failures in this region; use a failure-rate threshold.
 				perRegionFailureRate := float64(rs.Failures) / float64(rs.TotalCount)
-				// TODO: Make threshold configurable
-				if perRegionFailureRate >= 0.4 {
+				if perRegionFailureRate >= (w.datasetConfig.PerRegionFailureThresholdPercent / 100.0) {
 					// Consider this region as failed if 40% or more of submissions failed
 					submissionBucket.Regions[region] = false
 					submissionBucket.FailureCount += 1
@@ -401,14 +401,14 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBuc
 		var failedRegions []string
 
 		// Determine the health state for this bucket
-		if regionCount > 1 && failureRate >= 0.5 {
+		if regionCount > 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0 {
 			currentState = StateUnhealthyMultiRegion
 			for region, success := range submissionBucket.Regions {
 				if !success {
 					failedRegions = append(failedRegions, region)
 				}
 			}
-		} else if regionCount == 1 && failureRate >= 0.5 {
+		} else if regionCount == 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0 {
 			currentState = StateUnhealthySingleRegion
 		} else {
 			currentState = StateHealthy

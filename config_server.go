@@ -2,6 +2,15 @@ package main
 
 import "log/slog"
 
+type DatasetConfig struct {
+	RetentionDays                    int     `yaml:"retention_days" default:"90"`
+	ProcessingLookbackMinutes        int     `yaml:"processing_lookback_minutes" default:"10"`
+	PerRegionFailureThresholdPercent float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
+	FailureThresholdPercent          float64 `yaml:"failure_threshold_percent" default:"50.0"`
+	DegradedThresholdMinutes         int     `yaml:"degraded_threshold_minutes" default:"10"`
+	FailureThresholdMinutes          int     `yaml:"failure_threshold_minutes" default:"15"`
+}
+
 type ServerConfig struct {
 	Server struct {
 		Host string `yaml:"host"`
@@ -9,6 +18,10 @@ type ServerConfig struct {
 
 		LogLevel slog.Level `yaml:"log_level"`
 	} `yaml:"server"`
+	Metadata struct {
+		Title           string `yaml:"title" default:"Status Page"`
+		ShowLastUpdated bool   `yaml:"show_last_updated" default:"true"`
+	} `yaml:"metadata"`
 	RegisteredCheckers []struct {
 		Region string `yaml:"region"`
 		ApiKey string `yaml:"api_key"`
@@ -30,9 +43,7 @@ type ServerConfig struct {
 			ConsumerAddress string `yaml:"consumer_address" default:"mem://alerter_tasks"`
 		} `yaml:"alerter"`
 	} `yaml:"task_queue"`
-	Dataset struct {
-		RetentionDays int `yaml:"retention_days" default:"90"`
-	} `yaml:"dataset"`
+	Dataset  DatasetConfig `yaml:"dataset"`
 	Alerting struct {
 		Webhook struct {
 			Enabled    bool   `yaml:"enabled"`
