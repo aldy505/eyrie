@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS monitor_historical (
     timing_tls_handshake_start_ms INTEGER,
     timing_tls_handshake_done_ms INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (monitor_id, created_at)
+    PRIMARY KEY (monitor_id, region, created_at)
 );
 
 CREATE TABLE IF NOT EXISTS monitor_historical_daily_aggregate (

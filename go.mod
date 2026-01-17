@@ -8,6 +8,7 @@ require (
 	github.com/goccy/go-yaml v1.19.1
 	github.com/guregu/null/v5 v5.0.0
 	github.com/kelseyhightower/envconfig v1.4.0
+	github.com/rs/cors v1.11.1
 	gocloud.dev v0.44.0
 	gocloud.dev/pubsub/kafkapubsub v0.44.0
 	gocloud.dev/pubsub/natspubsub v0.44.0

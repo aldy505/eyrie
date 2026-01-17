@@ -128,7 +128,7 @@ REGISTER_UPSTREAM:
 			// We fetch new monitor config from upstream in the background
 			if c.nextUpstreamFetch != nil && currentTime.After(*c.nextUpstreamFetch) {
 				go func() {
-					fetchCtx, fetchCancel := context.WithTimeout(ctx, time.Minute)
+					fetchCtx, fetchCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 					defer fetchCancel()
 
 					err := c.registerToUpstream(fetchCtx)

@@ -2,7 +2,6 @@
 @import "tw-animate-css";
 @import "@fontsource/poppins";
 
-
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
