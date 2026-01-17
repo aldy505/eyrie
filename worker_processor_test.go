@@ -9,6 +9,14 @@ import (
 	"github.com/guregu/null/v5"
 )
 
+// defaultTestDatasetConfig returns a DatasetConfig with default threshold values for tests
+func defaultTestDatasetConfig() DatasetConfig {
+	return DatasetConfig{
+		PerRegionFailureThresholdPercent: 40.0,
+		FailureThresholdPercent:          50.0,
+	}
+}
+
 func TestEarliestLatestTimeTracking(t *testing.T) {
 	type Submission struct {
 		CreatedAt time.Time
@@ -59,10 +67,7 @@ func TestProcessorWorker_GroupSubmissionByMinute(t *testing.T) {
 		alerterProducer: nil,
 		shutdown:        make(chan struct{}),
 		monitorConfig:   MonitorConfig{},
-		datasetConfig: DatasetConfig{
-			PerRegionFailureThresholdPercent: 40.0,
-			FailureThresholdPercent:          50.0,
-		},
+		datasetConfig:   defaultTestDatasetConfig(),
 	}
 
 	const monitorId = "1"
@@ -569,10 +574,7 @@ func TestProcessorWorker_AnalyzeSubmissions(t *testing.T) {
 		alerterProducer: nil,
 		shutdown:        make(chan struct{}),
 		monitorConfig:   MonitorConfig{},
-		datasetConfig: DatasetConfig{
-			PerRegionFailureThresholdPercent: 40.0,
-			FailureThresholdPercent:          50.0,
-		},
+		datasetConfig:   defaultTestDatasetConfig(),
 	}
 
 	baseTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
