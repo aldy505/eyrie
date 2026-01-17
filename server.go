@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/guregu/null/v5"
 	"gocloud.dev/pubsub"
 )
@@ -55,10 +57,16 @@ func NewServer(options ServerOptions) (*Server, error) {
 		return nil, fmt.Errorf("creating sub-filesystem: %w", err)
 	}
 
+	sentryMiddleware := sentryhttp.New(sentryhttp.Options{
+		Repanic:         true,
+		WaitForDelivery: true,
+		Timeout:         2 * time.Second,
+	})
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /uptime-data", s.UptimeDataHandler)
-	mux.HandleFunc("POST /checker/register", s.CheckerRegistration)
-	mux.HandleFunc("POST /checker/submit", s.CheckerSubmission)
+	mux.Handle("GET /uptime-data", sentryMiddleware.HandleFunc(s.UptimeDataHandler))
+	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
+	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
 	mux.Handle("/", SpaHandler(distFS, "index.html"))
 
 	srv := &http.Server{
@@ -107,6 +115,9 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 
 	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
 	if err != nil {
+		if hub := sentry.GetHubFromContext(ctx); hub != nil {
+			hub.CaptureException(fmt.Errorf("fetching valid monitor ids: %w", err))
+		}
 		slog.ErrorContext(ctx, "fetching valid monitor ids", slog.String("error", err.Error()))
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -124,6 +135,9 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 		wg.Go(func() {
 			historical, err := s.fetchFromRawMonitorHistorical(ctx, monitor.ID)
 			if err != nil {
+				if hub := sentry.GetHubFromContext(ctx); hub != nil {
+					hub.CaptureException(fmt.Errorf("fetching monitor historical for monitor %s: %w", monitor.ID, err))
+				}
 				slog.ErrorContext(ctx, "fetching monitor historical", slog.String("monitor_id", monitor.ID), slog.String("error", err.Error()))
 				return
 			}
@@ -176,6 +190,10 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorMetadata, error) {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch Valid Monitor IDs"))
+	ctx = span.Context()
+	defer span.Finish()
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring database connection: %w", err)
@@ -216,6 +234,10 @@ func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorM
 var ErrMonitorConfigNotFound = errors.New("monitor config not found")
 
 func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Raw Monitor Historical"))
+	ctx = span.Context()
+	defer span.Finish()
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return UptimeDataHistorical{}, fmt.Errorf("getting db connection: %w", err)
@@ -352,6 +374,13 @@ func (s *Server) CheckerRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if hub := sentry.GetHubFromContext(r.Context()); hub != nil {
+		hub.Scope().SetTag("eyrie.checker_region", request.Region)
+	}
+	if span := sentry.SpanFromContext(r.Context()); span != nil {
+		span.SetData("eyrie.checker_region", request.Region)
+	}
+
 	slog.InfoContext(r.Context(), "checker registered", slog.String("region", request.Region))
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -421,6 +450,18 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestId := fmt.Sprintf("%s-%d", request.MonitorID, time.Now().UnixNano())
+
+	if hub := sentry.GetHubFromContext(ctx); hub != nil {
+		hub.Scope().SetTag("eyrie.request_id", requestId)
+		hub.Scope().SetTag("eyrie.monitor_id", request.MonitorID)
+		hub.Scope().SetTag("eyrie.checker_region", region)
+
+	}
+	if span := sentry.SpanFromContext(ctx); span != nil {
+		span.SetData("eyrie.request_id", requestId)
+		span.SetData("eyrie.monitor_id", request.MonitorID)
+		span.SetData("eyrie.checker_region", region)
+	}
 
 	wg := sync.WaitGroup{}
 	wg.Go(func() {

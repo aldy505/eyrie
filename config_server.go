@@ -40,14 +40,12 @@ type ServerConfig struct {
 			HmacSecret string `yaml:"hmac_secret"`
 		} `yaml:"webhook"`
 	} `yaml:"alerting"`
-	OpenTelemetry struct {
-		OtlpHttpExporter struct {
-			TracesEndpoint  string            `yaml:"traces_endpoint"`
-			TracesHeaders   map[string]string `yaml:"traces_headers"`
-			LogsEndpoint    string            `yaml:"logs_endpoint"`
-			LogsHeaders     map[string]string `yaml:"logs_headers"`
-			MetricsEndpoint string            `yaml:"metrics_endpoint"`
-			MetricsHeaders  map[string]string `yaml:"metrics_headers"`
-		} `yaml:"otlp_http_exporter"`
-	} `yaml:"open_telemetry"`
+	Sentry struct {
+		Dsn                   string  `yaml:"dsn"`
+		ErrorSampleRate       float64 `yaml:"error_sample_rate" default:"1.0"`
+		TracesSampleRate      float64 `yaml:"traces_sample_rate" default:"1.0"`
+		ProfilingSampleRate   float64 `yaml:"profiling_sample_rate" default:"0.1"`
+		Debug                 bool    `yaml:"debug" default:"false"`
+		TraceOutgoingRequests bool    `yaml:"trace_outgoing_requests" default:"false"`
+	} `yaml:"sentry"`
 }

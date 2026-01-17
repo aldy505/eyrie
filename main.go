@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
+	"github.com/getsentry/sentry-go"
+	sentryhttpclient "github.com/getsentry/sentry-go/httpclient"
 	"github.com/goccy/go-yaml"
 	"github.com/kelseyhightower/envconfig"
 	"gocloud.dev/pubsub"
@@ -66,6 +68,20 @@ func main() {
 			slog.Error("failed to unmarshal monitor file", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
+
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              serverConfig.Sentry.Dsn,
+			SampleRate:       serverConfig.Sentry.ErrorSampleRate,
+			EnableTracing:    true,
+			TracesSampleRate: serverConfig.Sentry.TracesSampleRate,
+			EnableLogs:       true,
+			Debug:            serverConfig.Sentry.Debug,
+			Release:          Version,
+		}); err != nil {
+			slog.Error("sentry initialization failed", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		defer sentry.Flush(2 * time.Second)
 
 		connector, err := duckdb.NewConnector(serverConfig.Database.Path, nil)
 		if err != nil {
@@ -238,9 +254,29 @@ func main() {
 			os.Exit(1)
 		}
 
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              checkerConfig.Sentry.Dsn,
+			SampleRate:       checkerConfig.Sentry.ErrorSampleRate,
+			EnableTracing:    true,
+			TracesSampleRate: checkerConfig.Sentry.TracesSampleRate,
+			EnableLogs:       true,
+			Debug:            checkerConfig.Sentry.Debug,
+			Release:          Version,
+		}); err != nil {
+			slog.Error("sentry initialization failed", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		defer sentry.Flush(2 * time.Second)
+
+		httpClient := http.DefaultClient
+		if checkerConfig.Sentry.TraceOutgoingRequests {
+			httpClient = &http.Client{
+				Transport: sentryhttpclient.NewSentryRoundTripper(nil, nil),
+			}
+		}
 		checker, err := NewChecker(CheckerOptions{
 			CheckerConfig: checkerConfig,
-			HttpClient:    http.DefaultClient,
+			HttpClient:    httpClient,
 		})
 		if err != nil {
 			slog.Error("failed to create checker", slog.String("error", err.Error()))

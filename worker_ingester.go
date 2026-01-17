@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"gocloud.dev/pubsub"
 )
 
@@ -35,7 +36,7 @@ func (w *IngesterWorker) Start() error {
 		case <-w.shutdown:
 			return nil
 		default:
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
 			defer cancel()
 
 			message, err := w.subscriber.Receive(ctx)
@@ -44,6 +45,9 @@ func (w *IngesterWorker) Start() error {
 				time.Sleep(time.Millisecond * 10)
 				continue
 			}
+
+			span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Ingester Worker Start"))
+			ctx = span.Context()
 
 			// Process the message here.
 			var request CheckerSubmissionRequest
@@ -54,6 +58,7 @@ func (w *IngesterWorker) Start() error {
 				} else {
 					message.Ack()
 				}
+				span.Finish()
 				continue
 			}
 
@@ -64,11 +69,20 @@ func (w *IngesterWorker) Start() error {
 				}
 			}
 
+			span.SetData("eyrie.monitor_id", request.MonitorID)
+			span.SetData("eyrie.region", region)
+
 			if err := w.ingestMonitorHistorical(ctx, request, region); err != nil {
+				if hub := sentry.GetHubFromContext(ctx); hub != nil {
+					hub.Scope().SetTag("eyrie.monitor_id", request.MonitorID)
+					hub.Scope().SetTag("eyrie.region", region)
+					hub.CaptureException(fmt.Errorf("ingesting monitor historical: %w", err))
+				}
 				slog.ErrorContext(ctx, "ingesting monitor historical", slog.String("error", err.Error()))
 			}
 
 			message.Ack()
+			span.Finish()
 		}
 	}
 }
@@ -79,6 +93,10 @@ func (w *IngesterWorker) Stop() error {
 }
 
 func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission CheckerSubmissionRequest, region string) error {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Ingest Monitor Historical"))
+	ctx = span.Context()
+	defer span.Finish()
+
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("getting db connection: %w", err)
@@ -149,7 +167,10 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 }
 
 func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, monitorID string, date time.Time) error {
-	// FIXME: I don't think this is the correct logic. Might want to revisit this some other time.
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Aggregate Daily Monitor Historical"))
+	ctx = span.Context()
+	defer span.Finish()
+
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("getting db connection: %w", err)

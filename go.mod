@@ -4,6 +4,7 @@ go 1.25.3
 
 require (
 	github.com/duckdb/duckdb-go/v2 v2.5.4
+	github.com/getsentry/sentry-go v0.41.0
 	github.com/goccy/go-yaml v1.19.1
 	github.com/guregu/null/v5 v5.0.0
 	github.com/kelseyhightower/envconfig v1.4.0
