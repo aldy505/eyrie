@@ -218,7 +218,8 @@ function MonitorCard({
                 );
               }
 
-              const downtime = downtimeMinutesSum / monitor.monitors.length;
+              const monitorCount = monitor.monitors.length;
+              const downtime = monitorCount === 0 ? 0 : downtimeMinutesSum / monitorCount;
 
               let state: "downtime" | "degraded" | "up" = "up";
               let title: string = "No downtime";

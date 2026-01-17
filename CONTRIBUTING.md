@@ -5,7 +5,7 @@ Thank you for considering to contribute to eyrie.
 ## Development Setup
 
 You would need:
-- Go programming language installed (preferrably version 1.25 or higher)
+- Go programming language installed (preferably version 1.25 or higher)
 - Node.js installed (preferably version 22.x or higher)
 - An IDE of choice (VSCode, JetBrains GoLand, or Vim)
 
