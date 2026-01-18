@@ -67,13 +67,13 @@ func NewServer(options ServerOptions) (*Server, error) {
 
 	corsMiddleware := cors.New(cors.Options{
 		AllowedOrigins: []string{"http://localhost:5173"},
-		AllowedMethods: []string{http.MethodGet, http.MethodPost},
+		AllowedMethods: []string{http.MethodGet},
 	})
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /config", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.ConfigHandler)))
 	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataHandler)))
-	mux.Handle("POST /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataByRegionHandler)))
+	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataByRegionHandler)))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
 	mux.Handle("/", SpaHandler(distFS, "index.html"))
@@ -264,10 +264,6 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-type UptimeDataByRegionRequest struct {
-	MonitorID string `json:"monitorId"`
-}
-
 type UptimeDataByRegionMonitor struct {
 	Region         string `json:"region"`
 	ResponseTimeMs int64  `json:"response_time_ms"`
@@ -289,17 +285,9 @@ type UptimeDataByRegionResponse struct {
 func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	var request UptimeDataByRegionRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		w.Header().Set("content-type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
-			Error: "invalid request body",
-		})
-		return
-	}
-
-	if request.MonitorID == "" {
+	// Get monitorId from URL query parameters
+	monitorID := r.URL.Query().Get("monitorId")
+	if monitorID == "" {
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
@@ -312,7 +300,7 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 	var monitorConfig Monitor
 	var foundMonitorConfig bool
 	for _, config := range s.monitorConfig.Monitors {
-		if config.ID == request.MonitorID {
+		if config.ID == monitorID {
 			monitorConfig = config
 			foundMonitorConfig = true
 			break
@@ -321,7 +309,7 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 
 	if !foundMonitorConfig {
 		w.Header().Set("content-type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
 			Error: "monitor not found",
 		})
@@ -329,7 +317,7 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Fetch data grouped by region
-	regionalData, err := s.fetchMonitorHistoricalByRegion(ctx, request.MonitorID, monitorConfig)
+	regionalData, err := s.fetchMonitorHistoricalByRegion(ctx, monitorID, monitorConfig)
 	if err != nil {
 		if hub := sentry.GetHubFromContext(ctx); hub != nil {
 			hub.CaptureException(fmt.Errorf("fetching monitor historical by region: %w", err))

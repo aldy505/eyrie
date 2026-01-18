@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -83,13 +82,13 @@ func TestUptimeDataByRegionHandler(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		requestBody    map[string]string
+		queryParams    map[string]string
 		expectedStatus int
 		validateBody   func(t *testing.T, body []byte)
 	}{
 		{
 			name: "valid request",
-			requestBody: map[string]string{
+			queryParams: map[string]string{
 				"monitorId": testMonitorID,
 			},
 			expectedStatus: http.StatusOK,
@@ -124,7 +123,7 @@ func TestUptimeDataByRegionHandler(t *testing.T) {
 		},
 		{
 			name: "missing monitorId",
-			requestBody: map[string]string{
+			queryParams: map[string]string{
 				"monitorId": "",
 			},
 			expectedStatus: http.StatusBadRequest,
@@ -140,10 +139,10 @@ func TestUptimeDataByRegionHandler(t *testing.T) {
 		},
 		{
 			name: "non-existent monitor",
-			requestBody: map[string]string{
+			queryParams: map[string]string{
 				"monitorId": "non-existent-monitor",
 			},
-			expectedStatus: http.StatusNotFound,
+			expectedStatus: http.StatusBadRequest,
 			validateBody: func(t *testing.T, body []byte) {
 				var response CommonErrorResponse
 				if err := json.Unmarshal(body, &response); err != nil {
@@ -158,13 +157,13 @@ func TestUptimeDataByRegionHandler(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bodyBytes, err := json.Marshal(tt.requestBody)
-			if err != nil {
-				t.Fatalf("failed to marshal request body: %v", err)
+			// Build URL with query parameters
+			url := "/uptime-data-by-region"
+			if monitorId, ok := tt.queryParams["monitorId"]; ok && monitorId != "" {
+				url += "?monitorId=" + monitorId
 			}
 
-			req := httptest.NewRequest(http.MethodPost, "/uptime-data-by-region", bytes.NewReader(bodyBytes))
-			req.Header.Set("Content-Type", "application/json")
+			req := httptest.NewRequest(http.MethodGet, url, nil)
 			w := httptest.NewRecorder()
 
 			server.UptimeDataByRegionHandler(w, req)
