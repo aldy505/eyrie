@@ -3,11 +3,21 @@ server:
   port: 8600
   log_level: "INFO"
 
+metadata:
+  title: "Eyrie Status Page"
+  show_last_updated: true
+
 registered_checkers:
   - region: "us-east-1"
     api_key: "us-east-1-api-key-here"
+  - region: "us-west-1"
+    api_key: "us-west-1-api-key-here"
   - region: "eu-west-1"
     api_key: "eu-west-1-api-key-here"
+  - region: "eu-central-1"
+    api_key: "eu-central-1-api-key-here"
+  - region: "ap-southeast-1"
+    api_key: "ap-southeast-1-api-key-here"
 
 database:
   path: "/var/lib/eyrie/database.db"

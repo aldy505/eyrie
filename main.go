@@ -52,6 +52,7 @@ func main() {
 		}
 
 		var serverConfig ServerConfig
+		envconfig.Process("", &serverConfig)
 		if err := yaml.Unmarshal(serverConfigFile, &serverConfig); err != nil {
 			slog.Error("failed to unmarshal config file", slog.String("error", err.Error()))
 			os.Exit(1)
@@ -64,6 +65,7 @@ func main() {
 		}
 
 		var monitorConfig MonitorConfig
+		envconfig.Process("", &monitorConfig)
 		if err := yaml.Unmarshal(monitorConfigFile, &monitorConfig); err != nil {
 			slog.Error("failed to unmarshal monitor file", slog.String("error", err.Error()))
 			os.Exit(1)
@@ -133,7 +135,7 @@ func main() {
 		}
 
 		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber)
-		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig)
+		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig, serverConfig.Dataset)
 		alerterWorker := NewAlerterWorker(alerterSubscriber)
 
 		srv, err := NewServer(ServerOptions{

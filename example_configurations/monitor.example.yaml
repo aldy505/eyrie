@@ -1,10 +1,49 @@
+groups:
+  - id: "example-group-1"
+    name: "Example Group 1"
+    monitor_ids:
+      - "example-monitor-1"
+      - "example-monitor-3"
+      - "example-monitor-4"
+
 monitors:
   - id: "example-monitor-1"
     name: "Example Monitor 1"
+    description: "This is an example monitor checking example.com"
     interval: "1m"
     method: "GET"
     skip_tls_verify: false
     url: "https://example.com"
+    expected_status_codes:
+      - 200
+      - 301
+      - 302
+      - 400
+    headers:
+      User-Agent: "EyrieMonitor/1.0"
+    timeout_seconds: 30
+  - id: "example-monitor-3"
+    name: "Example Monitor 3"
+    description: "This is an example monitor checking example.net"
+    interval: "1m"
+    method: "GET"
+    skip_tls_verify: false
+    url: "https://example.net"
+    expected_status_codes:
+      - 200
+      - 301
+      - 302
+      - 400
+    headers:
+      User-Agent: "EyrieMonitor/1.0"
+    timeout_seconds: 30
+  - id: "example-monitor-4"
+    name: "Example Monitor 4"
+    description: "This is an example monitor checking example.org"
+    interval: "1m"
+    method: "GET"
+    skip_tls_verify: false
+    url: "https://example.org"
     expected_status_codes:
       - 200
       - 301
@@ -21,3 +60,16 @@ monitors:
     url: "https://another-example.com/health"
     expected_status_codes:
       - 200
+  - id: "example-github-1"
+    name: "GitHub Status Monitor"
+    interval: "2m"
+    method: "GET"
+    skip_tls_verify: false
+    url: "https://github.com/healthz"
+    expected_status_codes:
+      - 200
+    headers:
+      User-Agent: "EyrieMonitor/1.0"
+      X-GitHub-Api-Version: "2022-11-28"
+      Accept: "text/plain"
+    timeout_seconds: 15

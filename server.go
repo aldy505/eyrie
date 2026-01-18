@@ -13,12 +13,14 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/guregu/null/v5"
+	"github.com/rs/cors"
 	"gocloud.dev/pubsub"
 )
 
@@ -63,8 +65,14 @@ func NewServer(options ServerOptions) (*Server, error) {
 		Timeout:         2 * time.Second,
 	})
 
+	corsMiddleware := cors.New(cors.Options{
+		AllowedOrigins: []string{"http://localhost:5173"},
+		AllowedMethods: []string{http.MethodGet},
+	})
+
 	mux := http.NewServeMux()
-	mux.Handle("GET /uptime-data", sentryMiddleware.HandleFunc(s.UptimeDataHandler))
+	mux.Handle("GET /config", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.ConfigHandler)))
+	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataHandler)))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
 	mux.Handle("/", SpaHandler(distFS, "index.html"))
@@ -84,8 +92,9 @@ type CommonErrorResponse struct {
 }
 
 type UptimeDataMonitorMetadata struct {
-	ID   string
-	Name string
+	ID          string
+	Name        string
+	Description null.String
 }
 
 type UptimeDataHistorical struct {
@@ -96,18 +105,35 @@ type UptimeDataHistorical struct {
 	}
 }
 
+type UptimeDataHandlerSingleMonitor struct {
+	ID             string      `json:"id"`
+	Name           string      `json:"name"`
+	Description    null.String `json:"description,omitempty"`
+	ResponseTimeMs int64       `json:"response_time_ms"`
+	Age            int         `json:"age"`
+	Downtimes      map[int]struct {
+		DurationMinutes int `json:"duration_minutes"`
+	} `json:"downtimes"`
+}
+
+type UptimeDataHandlerMonitorType string
+
+const (
+	UptimeDataHandlerMonitorTypeSingle UptimeDataHandlerMonitorType = "single"
+	UptimeDataHandlerMonitorTypeGroup  UptimeDataHandlerMonitorType = "group"
+)
+
+type UptimeDataHandlerMonitorGroup struct {
+	Type        UptimeDataHandlerMonitorType     `json:"type"`
+	ID          string                           `json:"id"`
+	Name        string                           `json:"name"`
+	Description null.String                      `json:"description,omitempty"`
+	Monitors    []UptimeDataHandlerSingleMonitor `json:"monitors"`
+}
+
 type UptimeDataHandlerResponse struct {
-	LastUpdated time.Time `json:"last_updated"`
-	Monitors    []struct {
-		ID             string `json:"id"`
-		Name           string `json:"name"`
-		ResponseTimeMs int64  `json:"response_time_ms"`
-		Age            int    `json:"age"`
-		Downtimes      map[int]struct {
-			DurationMinutes int `json:"duration_minutes"`
-		} `json:"downtimes"`
-	} `json:"monitors"`
-	RetentionDays int `json:"retention_days"`
+	LastUpdated time.Time                       `json:"last_updated"`
+	Monitors    []UptimeDataHandlerMonitorGroup `json:"monitors"`
 }
 
 func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
@@ -152,37 +178,85 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := UptimeDataHandlerResponse{
 		LastUpdated: time.Now(),
-		Monitors: []struct {
-			ID             string `json:"id"`
-			Name           string `json:"name"`
-			ResponseTimeMs int64  `json:"response_time_ms"`
-			Age            int    `json:"age"`
-			Downtimes      map[int]struct {
-				DurationMinutes int `json:"duration_minutes"`
-			} `json:"downtimes"`
-		}{},
-		RetentionDays: s.serverConfig.Dataset.RetentionDays,
+		Monitors:    []UptimeDataHandlerMonitorGroup{},
+	}
+	var uptimeDataHandlerMonitorGroup []UptimeDataHandlerMonitorGroup
+
+	// Build an index for monitor metadata to avoid O(n*m) lookups
+	monitorIndexByID := make(map[string]int, len(monitorMetadata))
+	for i, monitor := range monitorMetadata {
+		monitorIndexByID[monitor.ID] = i
 	}
 
-	for _, monitor := range monitorMetadata {
-		if historical, exists := m[monitor.ID]; exists {
-			response.Monitors = append(response.Monitors, struct {
-				ID             string `json:"id"`
-				Name           string `json:"name"`
-				ResponseTimeMs int64  `json:"response_time_ms"`
-				Age            int    `json:"age"`
-				Downtimes      map[int]struct {
-					DurationMinutes int `json:"duration_minutes"`
-				} `json:"downtimes"`
-			}{
-				ID:             monitor.ID,
-				Name:           monitor.Name,
-				ResponseTimeMs: historical.LatencyMs,
-				Age:            historical.MonitorAge,
-				Downtimes:      historical.DailyDowntimes,
-			})
+	// Prioritize group first
+	for _, group := range s.monitorConfig.Groups {
+		var groupMonitors []UptimeDataHandlerSingleMonitor
+		for _, monitorId := range group.MonitorIDs {
+			slog.InfoContext(ctx, "Trying to find monitor id: "+monitorId)
+			if idx, ok := monitorIndexByID[monitorId]; ok {
+				monitor := monitorMetadata[idx]
+				slog.InfoContext(ctx, "Found monitor ID "+monitor.ID+" for group ID "+group.ID)
+				if historical, exists := m[monitor.ID]; exists {
+					groupMonitors = append(groupMonitors, UptimeDataHandlerSingleMonitor{
+						ID:             monitor.ID,
+						Name:           monitor.Name,
+						Description:    monitor.Description,
+						ResponseTimeMs: historical.LatencyMs,
+						Age:            historical.MonitorAge,
+						Downtimes:      historical.DailyDowntimes,
+					})
+				}
+			}
+		}
+
+		uptimeDataHandlerMonitorGroup = append(uptimeDataHandlerMonitorGroup, UptimeDataHandlerMonitorGroup{
+			Type:        UptimeDataHandlerMonitorTypeGroup,
+			ID:          group.ID,
+			Name:        group.Name,
+			Description: group.Description,
+			Monitors:    groupMonitors,
+		})
+		slog.InfoContext(ctx, "Added group ID into the response.Monitors")
+	}
+
+	// Then add single monitors that are not part of any group
+	monitorsInGroups := make(map[string]bool)
+	for _, group := range s.monitorConfig.Groups {
+		for _, monitorId := range group.MonitorIDs {
+			monitorsInGroups[monitorId] = true
 		}
 	}
+
+	var singleMonitors []UptimeDataHandlerSingleMonitor
+	for _, monitor := range monitorMetadata {
+		if _, inGroup := monitorsInGroups[monitor.ID]; !inGroup {
+			if historical, exists := m[monitor.ID]; exists {
+				singleMonitors = append(singleMonitors, UptimeDataHandlerSingleMonitor{
+					ID:             monitor.ID,
+					Name:           monitor.Name,
+					Description:    monitor.Description,
+					ResponseTimeMs: historical.LatencyMs,
+					Age:            historical.MonitorAge,
+					Downtimes:      historical.DailyDowntimes,
+				})
+			}
+		}
+	}
+
+	for _, monitor := range singleMonitors {
+		uptimeDataHandlerMonitorGroup = append(uptimeDataHandlerMonitorGroup, UptimeDataHandlerMonitorGroup{
+			Type:        UptimeDataHandlerMonitorTypeSingle,
+			ID:          monitor.ID,
+			Name:        monitor.Name,
+			Description: monitor.Description,
+			Monitors:    []UptimeDataHandlerSingleMonitor{monitor},
+		})
+	}
+
+	slices.SortStableFunc(uptimeDataHandlerMonitorGroup, func(a UptimeDataHandlerMonitorGroup, b UptimeDataHandlerMonitorGroup) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	response.Monitors = uptimeDataHandlerMonitorGroup
 
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -221,6 +295,7 @@ func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorM
 		for _, m := range s.monitorConfig.Monitors {
 			if m.ID == monitor.ID {
 				monitor.Name = m.Name
+				monitor.Description = m.Description
 				break
 			}
 		}
@@ -495,4 +570,26 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
+}
+
+type ConfigHandlerResponse struct {
+	Title                    string `json:"title"`
+	ShowLastUpdated          bool   `json:"show_last_updated"`
+	RetentionDays            int    `json:"retention_days"`
+	DegradedThresholdMinutes int    `json:"degraded_threshold_minutes"`
+	FailureThresholdMinutes  int    `json:"failure_threshold_minutes"`
+}
+
+func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
+	response := ConfigHandlerResponse{
+		Title:                    s.serverConfig.Metadata.Title,
+		ShowLastUpdated:          s.serverConfig.Metadata.ShowLastUpdated,
+		RetentionDays:            s.serverConfig.Dataset.RetentionDays,
+		DegradedThresholdMinutes: s.serverConfig.Dataset.DegradedThresholdMinutes,
+		FailureThresholdMinutes:  s.serverConfig.Dataset.FailureThresholdMinutes,
+	}
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
 }
