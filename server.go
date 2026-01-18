@@ -434,6 +434,11 @@ func (s *Server) fetchMonitorHistoricalByRegion(ctx context.Context, monitorId s
 				}
 			}
 
+			// Skip days with no checks to avoid division by zero
+			if dayTotalChecks == 0 {
+				continue
+			}
+
 			dayAverageLatency := dayTotalLatency / dayTotalChecks
 			totalLatency += dayAverageLatency
 
@@ -445,6 +450,11 @@ func (s *Server) fetchMonitorHistoricalByRegion(ctx context.Context, monitorId s
 			}{
 				DurationMinutes: downtimeMinutes,
 			}
+		}
+
+		// Skip regions with no valid daily data to avoid division by zero
+		if len(dailyBucket) == 0 {
+			continue
 		}
 
 		// Calculate overall average latency for this region
