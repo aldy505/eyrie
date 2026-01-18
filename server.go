@@ -313,6 +313,15 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 	ctx = span.Context()
 	defer span.Finish()
 
+	// Try to fetch from aggregate table first (more efficient)
+	result, err := s.fetchFromAggregateMonitorHistorical(ctx, monitorId)
+	if err == nil {
+		return result, nil
+	}
+
+	// Fall back to raw data if aggregate is not available
+	slog.InfoContext(ctx, "falling back to raw monitor historical", slog.String("monitor_id", monitorId), slog.String("error", err.Error()))
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return UptimeDataHistorical{}, fmt.Errorf("getting db connection: %w", err)
@@ -409,6 +418,88 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 
 	// Calculate overall average latency
 	uptimeHistorical.LatencyMs = uptimeHistorical.LatencyMs / int64(len(dailyBucket))
+
+	return uptimeHistorical, nil
+}
+
+// fetchFromAggregateMonitorHistorical fetches monitor historical data from the aggregate table
+func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Aggregate Monitor Historical"))
+	ctx = span.Context()
+	defer span.Finish()
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return UptimeDataHistorical{}, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	// Query aggregated data
+	rows, err := conn.QueryContext(ctx, `
+		SELECT
+			date,
+			avg_latency_ms,
+			success_rate
+		FROM
+			monitor_historical_daily_aggregate
+		WHERE
+			monitor_id = ?
+		ORDER BY date DESC`,
+		monitorId,
+	)
+	if err != nil {
+		return UptimeDataHistorical{}, fmt.Errorf("querying aggregate monitor historical: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalDailyAggregate
+		if err := rows.Scan(&aggregate.Date, &aggregate.AvgLatencyMs, &aggregate.SuccessRate); err != nil {
+			return UptimeDataHistorical{}, fmt.Errorf("scanning aggregate monitor historical: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	if len(aggregates) == 0 {
+		return UptimeDataHistorical{}, fmt.Errorf("no aggregate data found for monitor %s", monitorId)
+	}
+
+	var uptimeHistorical = UptimeDataHistorical{
+		LatencyMs:  0,
+		MonitorAge: len(aggregates),
+		DailyDowntimes: make(map[int]struct {
+			DurationMinutes int `json:"duration_minutes"`
+		}),
+	}
+
+	// Calculate average latency and downtime from aggregates
+	var totalLatency int64 = 0
+	now := time.Now().UTC()
+
+	for _, aggregate := range aggregates {
+		totalLatency += int64(aggregate.AvgLatencyMs)
+
+		// Calculate downtime based on success rate
+		// If success rate is 80%, that means 20% downtime
+		// Assuming checks are done every minute, and there are 1440 minutes in a day
+		// downtime_minutes = (100 - success_rate) * 1440 / 100
+		downtimeMinutes := (100 - aggregate.SuccessRate) * 1440 / 100
+
+		// Calculate the index for DailyDowntimes map
+		// The index represents days ago from now
+		dailyDowntimesIndex := int(now.Sub(aggregate.Date).Hours() / 24)
+		uptimeHistorical.DailyDowntimes[dailyDowntimesIndex] = struct {
+			DurationMinutes int `json:"duration_minutes"`
+		}{
+			DurationMinutes: downtimeMinutes,
+		}
+	}
+
+	// Calculate overall average latency
+	if len(aggregates) > 0 {
+		uptimeHistorical.LatencyMs = totalLatency / int64(len(aggregates))
+	}
 
 	return uptimeHistorical, nil
 }

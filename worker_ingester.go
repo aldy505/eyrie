@@ -31,6 +31,9 @@ func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription) *IngesterWor
 // Start begins the ingestion process, listening for new messages.
 // It is a blocking call.
 func (w *IngesterWorker) Start() error {
+	// Start periodic aggregation in a separate goroutine
+	go w.runPeriodicAggregation()
+
 	for {
 		select {
 		case <-w.shutdown:
@@ -90,6 +93,95 @@ func (w *IngesterWorker) Start() error {
 func (w *IngesterWorker) Stop() error {
 	close(w.shutdown)
 	return nil
+}
+
+// runPeriodicAggregation runs the aggregation process every minute
+func (w *IngesterWorker) runPeriodicAggregation() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	// Run once immediately on startup
+	w.aggregateAllMonitors()
+
+	for {
+		select {
+		case <-w.shutdown:
+			return
+		case <-ticker.C:
+			w.aggregateAllMonitors()
+		}
+	}
+}
+
+// aggregateAllMonitors aggregates data for all monitors with recent data
+func (w *IngesterWorker) aggregateAllMonitors() {
+	ctx := sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone())
+	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Aggregate All Monitors"))
+	ctx = span.Context()
+	defer span.Finish()
+
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "getting db connection for aggregation", slog.String("error", err.Error()))
+		return
+	}
+	defer conn.Close()
+
+	// Get all distinct monitor IDs and dates from the last 30 days
+	rows, err := conn.QueryContext(ctx, `
+		SELECT DISTINCT 
+			monitor_id, 
+			CAST(created_at AS DATE) AS date
+		FROM monitor_historical
+		WHERE created_at >= ?
+	`, time.Now().AddDate(0, 0, -30))
+	if err != nil {
+		slog.ErrorContext(ctx, "querying monitor IDs and dates for aggregation", slog.String("error", err.Error()))
+		return
+	}
+	defer rows.Close()
+
+	type aggregationTask struct {
+		monitorID string
+		date      time.Time
+	}
+
+	var tasks []aggregationTask
+	for rows.Next() {
+		var monitorID string
+		var dateStr string
+		if err := rows.Scan(&monitorID, &dateStr); err != nil {
+			slog.ErrorContext(ctx, "scanning monitor ID and date", slog.String("error", err.Error()))
+			continue
+		}
+
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			slog.ErrorContext(ctx, "parsing date", slog.String("error", err.Error()), slog.String("date", dateStr))
+			continue
+		}
+
+		tasks = append(tasks, aggregationTask{monitorID: monitorID, date: date})
+	}
+
+	slog.InfoContext(ctx, "starting aggregation", slog.Int("task_count", len(tasks)))
+
+	// Aggregate each monitor/date combination
+	for _, task := range tasks {
+		if err := w.aggregateDailyMonitorHistorical(ctx, task.monitorID, task.date); err != nil {
+			if hub := sentry.GetHubFromContext(ctx); hub != nil {
+				hub.Scope().SetTag("eyrie.monitor_id", task.monitorID)
+				hub.Scope().SetTag("eyrie.date", task.date.Format("2006-01-02"))
+				hub.CaptureException(fmt.Errorf("aggregating daily monitor historical: %w", err))
+			}
+			slog.ErrorContext(ctx, "aggregating daily monitor historical",
+				slog.String("monitor_id", task.monitorID),
+				slog.String("date", task.date.Format("2006-01-02")),
+				slog.String("error", err.Error()))
+		}
+	}
+
+	slog.InfoContext(ctx, "aggregation completed", slog.Int("task_count", len(tasks)))
 }
 
 func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission CheckerSubmissionRequest, region string) error {
