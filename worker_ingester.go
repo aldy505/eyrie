@@ -97,7 +97,8 @@ func (w *IngesterWorker) Stop() error {
 
 // runPeriodicAggregation runs the aggregation process every minute
 func (w *IngesterWorker) runPeriodicAggregation() {
-	ticker := time.NewTicker(1 * time.Minute)
+	const aggregationInterval = 1 * time.Minute
+	ticker := time.NewTicker(aggregationInterval)
 	defer ticker.Stop()
 
 	// Run once immediately on startup
@@ -115,6 +116,7 @@ func (w *IngesterWorker) runPeriodicAggregation() {
 
 // aggregateAllMonitors aggregates data for all monitors with recent data
 func (w *IngesterWorker) aggregateAllMonitors() {
+	const aggregationLookbackDays = 30
 	ctx := sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone())
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Aggregate All Monitors"))
 	ctx = span.Context()
@@ -134,7 +136,7 @@ func (w *IngesterWorker) aggregateAllMonitors() {
 			CAST(created_at AS DATE) AS date
 		FROM monitor_historical
 		WHERE created_at >= ?
-	`, time.Now().AddDate(0, 0, -30))
+	`, time.Now().AddDate(0, 0, -aggregationLookbackDays))
 	if err != nil {
 		slog.ErrorContext(ctx, "querying monitor IDs and dates for aggregation", slog.String("error", err.Error()))
 		return

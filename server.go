@@ -424,6 +424,12 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 
 // fetchFromAggregateMonitorHistorical fetches monitor historical data from the aggregate table
 func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
+	const (
+		minutesPerDay       = 1440
+		checksPerMinute     = 1
+		checksPerDay        = minutesPerDay * checksPerMinute
+	)
+
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Aggregate Monitor Historical"))
 	ctx = span.Context()
 	defer span.Finish()
@@ -484,11 +490,17 @@ func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monito
 		// If success rate is 80%, that means 20% downtime
 		// Assuming checks are done every minute, and there are 1440 minutes in a day
 		// downtime_minutes = (100 - success_rate) * 1440 / 100
-		downtimeMinutes := (100 - aggregate.SuccessRate) * 1440 / 100
+		downtimeMinutes := (100 - aggregate.SuccessRate) * minutesPerDay / 100
 
 		// Calculate the index for DailyDowntimes map
 		// The index represents days ago from now
-		dailyDowntimesIndex := int(now.Sub(aggregate.Date).Hours() / 24)
+		// Use date-based calculation to avoid floating-point precision issues
+		year, month, day := aggregate.Date.Date()
+		aggregateDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+		nowYear, nowMonth, nowDay := now.Date()
+		nowDate := time.Date(nowYear, nowMonth, nowDay, 0, 0, 0, 0, time.UTC)
+		dailyDowntimesIndex := int(nowDate.Sub(aggregateDate) / (24 * time.Hour))
+		
 		uptimeHistorical.DailyDowntimes[dailyDowntimesIndex] = struct {
 			DurationMinutes int `json:"duration_minutes"`
 		}{
