@@ -255,7 +255,7 @@ func TestServer_UptimeDataByRegionHandler(t *testing.T) {
 			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
 			Timings:    CheckerTraceTimings{},
 		}
-		err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1")
+		err := ingesterWorker.ingestMonitorHistorical(context.Background(), submission, "us-east-1")
 		if err != nil {
 			t.Fatalf("failed to ingest monitor historical for us-east-1: %v", err)
 		}
@@ -270,7 +270,7 @@ func TestServer_UptimeDataByRegionHandler(t *testing.T) {
 			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
 			Timings:    CheckerTraceTimings{},
 		}
-		err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-west-2")
+		err := ingesterWorker.ingestMonitorHistorical(context.Background(), submission, "us-west-2")
 		if err != nil {
 			t.Fatalf("failed to ingest monitor historical for us-west-2: %v", err)
 		}
@@ -289,7 +289,7 @@ func TestServer_UptimeDataByRegionHandler(t *testing.T) {
 			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
 			Timings:    CheckerTraceTimings{},
 		}
-		err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "eu-west-1")
+		err := ingesterWorker.ingestMonitorHistorical(context.Background(), submission, "eu-west-1")
 		if err != nil {
 			t.Fatalf("failed to ingest monitor historical for eu-west-1: %v", err)
 		}
