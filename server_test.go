@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -217,3 +220,223 @@ func TestServer_FetchFromRawMonitorHistoricalFallback(t *testing.T) {
 		t.Errorf("expected average latency = 100, got %d", result.LatencyMs)
 	}
 }
+
+func TestServer_UptimeDataByRegionHandler(t *testing.T) {
+	monitorID := "test-region-monitor"
+	testDate := time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+	})
+
+	// Insert test data for multiple regions
+	ingesterWorker := &IngesterWorker{
+		db:         db,
+		subscriber: nil,
+		shutdown:   make(chan struct{}),
+	}
+
+	// Insert data for us-east-1
+	for i := 0; i < 5; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  int64(100),
+			StatusCode: 200,
+			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		err := ingesterWorker.ingestMonitorHistorical(context.Background(), submission, "us-east-1")
+		if err != nil {
+			t.Fatalf("failed to ingest monitor historical for us-east-1: %v", err)
+		}
+	}
+
+	// Insert data for us-west-2
+	for i := 0; i < 5; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  int64(150),
+			StatusCode: 200,
+			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		err := ingesterWorker.ingestMonitorHistorical(context.Background(), submission, "us-west-2")
+		if err != nil {
+			t.Fatalf("failed to ingest monitor historical for us-west-2: %v", err)
+		}
+	}
+
+	// Insert data for eu-west-1 with some failures
+	for i := 0; i < 5; i++ {
+		statusCode := 200
+		if i >= 3 {
+			statusCode = 500
+		}
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  int64(200),
+			StatusCode: statusCode,
+			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		err := ingesterWorker.ingestMonitorHistorical(context.Background(), submission, "eu-west-1")
+		if err != nil {
+			t.Fatalf("failed to ingest monitor historical for eu-west-1: %v", err)
+		}
+	}
+
+	// Create a test server
+	server := &Server{
+		db:            db,
+		serverConfig:  ServerConfig{},
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					Name:                "Test Region Monitor",
+					Description:         null.StringFrom("Test description for region endpoint"),
+					ExpectedStatusCodes: []int{200},
+				},
+			},
+		},
+	}
+
+	// Test the handler by simulating an HTTP request
+	req := httptest.NewRequest(http.MethodGet, "/uptime-data-by-region?monitorId="+monitorID, nil)
+	w := httptest.NewRecorder()
+
+	server.UptimeDataByRegionHandler(w, req)
+
+	// Check response status
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status code %d, got %d", http.StatusOK, w.Code)
+		t.Logf("Response body: %s", w.Body.String())
+	}
+
+	// Parse response
+	var response UptimeDataByRegionResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify metadata
+	if response.Metadata.Name != "Test Region Monitor" {
+		t.Errorf("expected name 'Test Region Monitor', got '%s'", response.Metadata.Name)
+	}
+
+	// Verify we have data for 3 regions
+	if len(response.Monitors) != 3 {
+		t.Errorf("expected 3 regions, got %d", len(response.Monitors))
+	}
+
+	// Find each region and verify data
+	regionMap := make(map[string]UptimeDataByRegionMonitor)
+	for _, m := range response.Monitors {
+		regionMap[m.Region] = m
+	}
+
+	// Verify us-east-1
+	if usEast1, ok := regionMap["us-east-1"]; ok {
+		if usEast1.ResponseTimeMs != 100 {
+			t.Errorf("expected us-east-1 response time 100ms, got %d", usEast1.ResponseTimeMs)
+		}
+		if usEast1.Age != 1 {
+			t.Errorf("expected us-east-1 age 1 day, got %d", usEast1.Age)
+		}
+	} else {
+		t.Error("expected us-east-1 in response")
+	}
+
+	// Verify us-west-2
+	if usWest2, ok := regionMap["us-west-2"]; ok {
+		if usWest2.ResponseTimeMs != 150 {
+			t.Errorf("expected us-west-2 response time 150ms, got %d", usWest2.ResponseTimeMs)
+		}
+	} else {
+		t.Error("expected us-west-2 in response")
+	}
+
+	// Verify eu-west-1 (should have downtime)
+	if euWest1, ok := regionMap["eu-west-1"]; ok {
+		if euWest1.ResponseTimeMs != 200 {
+			t.Errorf("expected eu-west-1 response time 200ms, got %d", euWest1.ResponseTimeMs)
+		}
+		// Should have some downtime since 2 out of 5 checks failed
+		if len(euWest1.Downtimes) == 0 {
+			t.Error("expected eu-west-1 to have downtime data")
+		}
+	} else {
+		t.Error("expected eu-west-1 in response")
+	}
+}
+
+func TestServer_UptimeDataByRegionHandler_MissingMonitorId(t *testing.T) {
+	server := &Server{
+		db:            db,
+		serverConfig:  ServerConfig{},
+		monitorConfig: MonitorConfig{},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/uptime-data-by-region", nil)
+	w := httptest.NewRecorder()
+
+	server.UptimeDataByRegionHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status code %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var response CommonErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+
+	if response.Error != "monitorId query parameter is required" {
+		t.Errorf("expected error 'monitorId query parameter is required', got '%s'", response.Error)
+	}
+}
+
+func TestServer_UptimeDataByRegionHandler_NotFound(t *testing.T) {
+	server := &Server{
+		db:            db,
+		serverConfig:  ServerConfig{},
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  "existing-monitor",
+					Name:                "Existing Monitor",
+					ExpectedStatusCodes: []int{200},
+				},
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/uptime-data-by-region?monitorId=non-existent", nil)
+	w := httptest.NewRecorder()
+
+	server.UptimeDataByRegionHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status code %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var response CommonErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+
+	if response.Error != "monitor not found" {
+		t.Errorf("expected error 'monitor not found', got '%s'", response.Error)
+	}
+}
+

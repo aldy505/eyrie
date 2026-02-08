@@ -73,6 +73,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /config", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.ConfigHandler)))
 	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataHandler)))
+	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataByRegionHandler)))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
 	mux.Handle("/", SpaHandler(distFS, "index.html"))
@@ -134,6 +135,26 @@ type UptimeDataHandlerMonitorGroup struct {
 type UptimeDataHandlerResponse struct {
 	LastUpdated time.Time                       `json:"last_updated"`
 	Monitors    []UptimeDataHandlerMonitorGroup `json:"monitors"`
+}
+
+type UptimeDataByRegionMetadata struct {
+	Name        string      `json:"name"`
+	Description null.String `json:"description,omitempty"`
+}
+
+type UptimeDataByRegionMonitor struct {
+	Region         string `json:"region"`
+	ResponseTimeMs int64  `json:"response_time_ms"`
+	Age            int    `json:"age"`
+	Downtimes      map[int]struct {
+		DurationMinutes int `json:"duration_minutes"`
+	} `json:"downtimes"`
+}
+
+type UptimeDataByRegionResponse struct {
+	LastUpdated time.Time                   `json:"last_updated"`
+	Metadata    UptimeDataByRegionMetadata  `json:"metadata"`
+	Monitors    []UptimeDataByRegionMonitor `json:"monitors"`
 }
 
 func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +278,184 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 		return strings.Compare(a.ID, b.ID)
 	})
 	response.Monitors = uptimeDataHandlerMonitorGroup
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get monitorId from query parameter
+	monitorId := r.URL.Query().Get("monitorId")
+	if monitorId == "" {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+			Error: "monitorId query parameter is required",
+		})
+		return
+	}
+
+	// Find the monitor configuration
+	var monitorConfig Monitor
+	var foundMonitorConfig bool
+	for _, config := range s.monitorConfig.Monitors {
+		if config.ID == monitorId {
+			monitorConfig = config
+			foundMonitorConfig = true
+			break
+		}
+	}
+
+	if !foundMonitorConfig {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+			Error: "monitor not found",
+		})
+		return
+	}
+
+	// Fetch monitor historical data grouped by region
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		if hub := sentry.GetHubFromContext(ctx); hub != nil {
+			hub.CaptureException(fmt.Errorf("acquiring database connection: %w", err))
+		}
+		slog.ErrorContext(ctx, "acquiring database connection", slog.String("error", err.Error()))
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+			Error: "failed to acquire database connection",
+		})
+		return
+	}
+	defer conn.Close()
+
+	// Query all monitor historical data for this monitor
+	rows, err := conn.QueryContext(ctx, `
+		SELECT
+			region,
+			status_code,
+			latency_ms,
+			created_at
+		FROM
+			monitor_historical
+		WHERE
+			monitor_id = ?`,
+		monitorId,
+	)
+	if err != nil {
+		if hub := sentry.GetHubFromContext(ctx); hub != nil {
+			hub.CaptureException(fmt.Errorf("querying monitor historical: %w", err))
+		}
+		slog.ErrorContext(ctx, "querying monitor historical", slog.String("error", err.Error()))
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+			Error: "failed to query monitor historical data",
+		})
+		return
+	}
+	defer rows.Close()
+
+	var monitorHistoricals []MonitorHistorical
+	for rows.Next() {
+		var monitorHistorical MonitorHistorical
+		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
+			if hub := sentry.GetHubFromContext(ctx); hub != nil {
+				hub.CaptureException(fmt.Errorf("scanning monitor historical: %w", err))
+			}
+			slog.ErrorContext(ctx, "scanning monitor historical", slog.String("error", err.Error()))
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+				Error: "failed to scan monitor historical data",
+			})
+			return
+		}
+		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
+	}
+
+	// Group by region and calculate stats for each region
+	regionData := make(map[string][]MonitorHistorical)
+	for _, mh := range monitorHistoricals {
+		regionData[mh.Region] = append(regionData[mh.Region], mh)
+	}
+
+	var monitors []UptimeDataByRegionMonitor
+	for region, historicals := range regionData {
+		// Group each monitor historicals on a daily bucket
+		dailyBucket := make(map[time.Time][]MonitorHistorical)
+		for _, mh := range historicals {
+			year, month, day := mh.CreatedAt.Date()
+			bucketDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+			if _, exists := dailyBucket[bucketDate]; !exists {
+				dailyBucket[bucketDate] = []MonitorHistorical{}
+			}
+			dailyBucket[bucketDate] = append(dailyBucket[bucketDate], mh)
+		}
+
+		var regionMonitor = UptimeDataByRegionMonitor{
+			Region:         region,
+			ResponseTimeMs: 0,
+			Age:            len(dailyBucket),
+			Downtimes: make(map[int]struct {
+				DurationMinutes int `json:"duration_minutes"`
+			}),
+		}
+
+		// Calculate stats for each day
+		for date, dayHistoricals := range dailyBucket {
+			var totalLatency int64 = 0
+			var totalChecks int64 = 0
+			var downtimeMinutes int = 0
+
+			for _, mh := range dayHistoricals {
+				totalLatency += int64(mh.LatencyMs)
+				totalChecks++
+
+				if !slices.Contains(monitorConfig.ExpectedStatusCodes, mh.StatusCode) {
+					downtimeMinutes += 1 // assuming each check is done every minute
+				}
+			}
+
+			averageLatency := totalLatency / totalChecks
+			regionMonitor.ResponseTimeMs += averageLatency
+
+			// Calculate downtime index (days ago from now)
+			now := time.Now().UTC()
+			dailyDowntimesIndex := int(now.Sub(date).Hours() / 24)
+			regionMonitor.Downtimes[dailyDowntimesIndex] = struct {
+				DurationMinutes int `json:"duration_minutes"`
+			}{
+				DurationMinutes: downtimeMinutes,
+			}
+		}
+
+		// Calculate overall average latency for this region
+		if len(dailyBucket) > 0 {
+			regionMonitor.ResponseTimeMs = regionMonitor.ResponseTimeMs / int64(len(dailyBucket))
+		}
+
+		monitors = append(monitors, regionMonitor)
+	}
+
+	// Sort monitors by region name for consistent output
+	slices.SortStableFunc(monitors, func(a, b UptimeDataByRegionMonitor) int {
+		return strings.Compare(a.Region, b.Region)
+	})
+
+	response := UptimeDataByRegionResponse{
+		LastUpdated: time.Now(),
+		Metadata: UptimeDataByRegionMetadata{
+			Name:        monitorConfig.Name,
+			Description: monitorConfig.Description,
+		},
+		Monitors: monitors,
+	}
 
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
