@@ -318,71 +318,14 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Fetch monitor historical data grouped by region
-	conn, err := s.db.Conn(ctx)
+	regionData, err := s.fetchMonitorHistoricalGroupedByRegion(ctx, monitorId)
 	if err != nil {
-		if hub := sentry.GetHubFromContext(ctx); hub != nil {
-			hub.CaptureException(fmt.Errorf("acquiring database connection: %w", err))
-		}
-		slog.ErrorContext(ctx, "acquiring database connection", slog.String("error", err.Error()))
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
-			Error: "failed to acquire database connection",
+			Error: "failed to fetch monitor historical data",
 		})
 		return
-	}
-	defer conn.Close()
-
-	// Query all monitor historical data for this monitor
-	rows, err := conn.QueryContext(ctx, `
-		SELECT
-			region,
-			status_code,
-			latency_ms,
-			created_at
-		FROM
-			monitor_historical
-		WHERE
-			monitor_id = ?`,
-		monitorId,
-	)
-	if err != nil {
-		if hub := sentry.GetHubFromContext(ctx); hub != nil {
-			hub.CaptureException(fmt.Errorf("querying monitor historical: %w", err))
-		}
-		slog.ErrorContext(ctx, "querying monitor historical", slog.String("error", err.Error()))
-		w.Header().Set("content-type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
-			Error: "failed to query monitor historical data",
-		})
-		return
-	}
-	defer rows.Close()
-
-	var monitorHistoricals []MonitorHistorical
-	for rows.Next() {
-		var monitorHistorical MonitorHistorical
-		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
-			if hub := sentry.GetHubFromContext(ctx); hub != nil {
-				hub.CaptureException(fmt.Errorf("scanning monitor historical: %w", err))
-			}
-			slog.ErrorContext(ctx, "scanning monitor historical", slog.String("error", err.Error()))
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{
-				Error: "failed to scan monitor historical data",
-			})
-			return
-		}
-		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
-	}
-
-	// Group by region and calculate stats for each region
-	regionData := make(map[string][]MonitorHistorical)
-	for _, mh := range monitorHistoricals {
-		regionData[mh.Region] = append(regionData[mh.Region], mh)
 	}
 
 	var monitors []UptimeDataByRegionMonitor
@@ -624,9 +567,9 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 // fetchFromAggregateMonitorHistorical fetches monitor historical data from the aggregate table
 func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
 	const (
-		minutesPerDay       = 1440
-		checksPerMinute     = 1
-		checksPerDay        = minutesPerDay * checksPerMinute
+		minutesPerDay   = 1440
+		checksPerMinute = 1
+		checksPerDay    = minutesPerDay * checksPerMinute
 	)
 
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Aggregate Monitor Historical"))
@@ -699,7 +642,7 @@ func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monito
 		nowYear, nowMonth, nowDay := now.Date()
 		nowDate := time.Date(nowYear, nowMonth, nowDay, 0, 0, 0, 0, time.UTC)
 		dailyDowntimesIndex := int(nowDate.Sub(aggregateDate) / (24 * time.Hour))
-		
+
 		uptimeHistorical.DailyDowntimes[dailyDowntimesIndex] = struct {
 			DurationMinutes int `json:"duration_minutes"`
 		}{
@@ -713,6 +656,65 @@ func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monito
 	}
 
 	return uptimeHistorical, nil
+}
+
+func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, monitorId string) (map[string][]MonitorHistorical, error) {
+	// Fetch monitor historical data grouped by region
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		if hub := sentry.GetHubFromContext(ctx); hub != nil {
+			hub.CaptureException(fmt.Errorf("acquiring database connection: %w", err))
+		}
+		return nil, fmt.Errorf("acquiring database connection: %w", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			if hub := sentry.GetHubFromContext(ctx); hub != nil {
+				hub.CaptureException(fmt.Errorf("closing database connection: %w", err))
+			}
+		}
+	}()
+
+	// Query all monitor historical data for this monitor
+	rows, err := conn.QueryContext(ctx, `
+		SELECT
+			region,
+			status_code,
+			latency_ms,
+			created_at
+		FROM
+			monitor_historical
+		WHERE
+			monitor_id = ?`,
+		monitorId,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying monitor historical: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			if hub := sentry.GetHubFromContext(ctx); hub != nil {
+				hub.CaptureException(fmt.Errorf("closing rows: %w", err))
+			}
+		}
+	}()
+
+	var monitorHistoricals []MonitorHistorical
+	for rows.Next() {
+		var monitorHistorical MonitorHistorical
+		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning monitor historical: %w", err)
+		}
+		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
+	}
+
+	// Group by region and calculate stats for each region
+	regionData := make(map[string][]MonitorHistorical)
+	for _, mh := range monitorHistoricals {
+		regionData[mh.Region] = append(regionData[mh.Region], mh)
+	}
+
+	return regionData, nil
 }
 
 type CheckerRegistrationRequest struct {

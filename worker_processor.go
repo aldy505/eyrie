@@ -311,14 +311,15 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 
 		// Now process each region's aggregated data
 		for region, rs := range regionSubmissionCount {
-			if rs.Failures == 0 {
+			switch rs.Failures {
+			case 0:
 				// All successful submissions in this region
 				submissionBucket.Regions[region] = true
-			} else if rs.Failures == rs.TotalCount {
+			case rs.TotalCount:
 				// All failed submissions in this region
 				submissionBucket.Regions[region] = false
 				submissionBucket.FailureCount += 1
-			} else {
+			default:
 				// Mixed successes and failures in this region; use a failure-rate threshold.
 				perRegionFailureRate := float64(rs.Failures) / float64(rs.TotalCount)
 				if perRegionFailureRate >= (w.datasetConfig.PerRegionFailureThresholdPercent / 100.0) {
