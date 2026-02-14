@@ -43,7 +43,7 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.FS(h.fileSystem)).ServeHTTP(w, r)
 }
 
-func (h *spaHandler) serveIndex(w http.ResponseWriter, r *http.Request) {
+func (h *spaHandler) serveIndex(w http.ResponseWriter, _ *http.Request) {
 	content, err := fs.ReadFile(h.fileSystem, h.indexFile)
 	if err != nil {
 		http.Error(w, "Index file not found", http.StatusNotFound)
