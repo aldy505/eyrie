@@ -197,6 +197,15 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 	}
 	defer conn.Close()
 
+	probeType := submission.ProbeType
+	if probeType == "" {
+		probeType = string(MonitorTypeHTTP)
+	}
+	success := submission.Success
+	if !success && (probeType == string(MonitorTypeHTTP) || probeType == "") {
+		success = submission.StatusCode >= 200 && submission.StatusCode < 400
+	}
+
 	// Insert raw monitor historical data
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO
@@ -204,6 +213,9 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 			(
 				monitor_id, 
 				region, 
+				probe_type,
+				success,
+				failure_reason,
 				status_code, 
 				latency_ms, 
 				response_body, 
@@ -234,11 +246,17 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 				?,
 				?,
 				?,
+				?,
+				?,
+				?,
 				?
 			)
 	`,
 		submission.MonitorID,
 		region,
+		probeType,
+		success,
+		submission.FailureReason,
 		submission.StatusCode,
 		submission.LatencyMs,
 		submission.ResponseBody,
@@ -280,7 +298,7 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
 			MIN(latency_ms) AS min_latency_ms,
 			MAX(latency_ms) AS max_latency_ms,
-			CAST(CAST(SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
+			CAST(CAST(SUM(CASE WHEN success THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
 		FROM monitor_historical
 		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
 		GROUP BY monitor_id, DATE(created_at)
@@ -293,6 +311,30 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 	`, monitorID, date.Format("2006-01-02"))
 	if err != nil {
 		return fmt.Errorf("aggregating daily monitor historical: %w", err)
+	}
+
+	_, err = conn.ExecContext(ctx, `
+		INSERT INTO monitor_historical_region_daily_aggregate (monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
+		SELECT
+			monitor_id,
+			region,
+			DATE(created_at) AS date,
+			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
+			MIN(latency_ms) AS min_latency_ms,
+			MAX(latency_ms) AS max_latency_ms,
+			CAST(CAST(SUM(CASE WHEN success THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
+		FROM monitor_historical
+		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
+		GROUP BY monitor_id, region, DATE(created_at)
+		ON CONFLICT (monitor_id, region, date) DO UPDATE
+		SET
+			avg_latency_ms = EXCLUDED.avg_latency_ms,
+			min_latency_ms = EXCLUDED.min_latency_ms,
+			max_latency_ms = EXCLUDED.max_latency_ms,
+			success_rate = EXCLUDED.success_rate
+	`, monitorID, date.Format("2006-01-02"))
+	if err != nil {
+		return fmt.Errorf("aggregating region daily monitor historical: %w", err)
 	}
 
 	return nil

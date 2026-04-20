@@ -88,8 +88,8 @@ func TestServer_FetchFromAggregateMonitorHistorical(t *testing.T) {
 
 	// Now test the server's fetch method
 	server := &Server{
-		db:            db,
-		serverConfig:  ServerConfig{},
+		db:           db,
+		serverConfig: ServerConfig{},
 		monitorConfig: MonitorConfig{
 			Monitors: []Monitor{
 				{
@@ -192,8 +192,8 @@ func TestServer_FetchFromRawMonitorHistoricalFallback(t *testing.T) {
 
 	// Test the server's fetch method - it should fall back to raw data
 	server := &Server{
-		db:            db,
-		serverConfig:  ServerConfig{},
+		db:           db,
+		serverConfig: ServerConfig{},
 		monitorConfig: MonitorConfig{
 			Monitors: []Monitor{
 				{
@@ -297,8 +297,8 @@ func TestServer_UptimeDataByRegionHandler(t *testing.T) {
 
 	// Create a test server
 	server := &Server{
-		db:            db,
-		serverConfig:  ServerConfig{},
+		db:           db,
+		serverConfig: ServerConfig{},
 		monitorConfig: MonitorConfig{
 			Monitors: []Monitor{
 				{
@@ -408,8 +408,8 @@ func TestServer_UptimeDataByRegionHandler_MissingMonitorId(t *testing.T) {
 
 func TestServer_UptimeDataByRegionHandler_NotFound(t *testing.T) {
 	server := &Server{
-		db:            db,
-		serverConfig:  ServerConfig{},
+		db:           db,
+		serverConfig: ServerConfig{},
 		monitorConfig: MonitorConfig{
 			Monitors: []Monitor{
 				{
@@ -439,4 +439,3 @@ func TestServer_UptimeDataByRegionHandler_NotFound(t *testing.T) {
 		t.Errorf("expected error 'monitor not found', got '%s'", response.Error)
 	}
 }
-

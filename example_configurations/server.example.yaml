@@ -35,9 +35,30 @@ task_queue:
 
 dataset:
   retention_days: 90
+  processing_lookback_minutes: 10
+  per_region_failure_threshold_percent: 40
+  failure_threshold_percent: 50
+  degraded_threshold_minutes: 10
+  failure_threshold_minutes: 15
 
 alerting:
   webhook:
     enabled: false
     url: "https://example.com/webhook"
     hmac_secret: "your-hmac-secret-here"
+    custom_headers:
+      X-Environment: "production"
+  slack:
+    enabled: false
+    webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+  discord:
+    enabled: false
+    webhook_url: "https://discord.com/api/webhooks/XXX/YYY"
+  teams:
+    enabled: false
+    webhook_url: "https://example.webhook.office.com/webhookb2/..."
+  ntfy:
+    enabled: false
+    topic_url: "https://ntfy.sh/eyrie-alerts"
+    access_token: "ntfy-access-token"
+    priority: 4

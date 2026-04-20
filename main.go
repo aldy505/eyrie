@@ -70,6 +70,12 @@ func main() {
 			slog.Error("failed to unmarshal monitor file", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
+		for _, monitor := range monitorConfig.Monitors {
+			if err := monitor.Validate(); err != nil {
+				slog.Error("invalid monitor config", slog.String("error", err.Error()))
+				os.Exit(1)
+			}
+		}
 
 		if err := sentry.Init(sentry.ClientOptions{
 			Dsn:              serverConfig.Sentry.Dsn,
@@ -136,7 +142,7 @@ func main() {
 
 		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber)
 		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig, serverConfig.Dataset)
-		alerterWorker := NewAlerterWorker(alerterSubscriber)
+		alerterWorker := NewAlerterWorker(alerterSubscriber, BuildAlerters(serverConfig))
 
 		srv, err := NewServer(ServerOptions{
 			Database:          db,

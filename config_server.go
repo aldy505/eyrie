@@ -11,6 +11,37 @@ type DatasetConfig struct {
 	FailureThresholdMinutes          int     `yaml:"failure_threshold_minutes" default:"15"`
 }
 
+type WebhookAlertingConfig struct {
+	Enabled       bool              `yaml:"enabled"`
+	URL           string            `yaml:"url"`
+	HmacSecret    string            `yaml:"hmac_secret"`
+	CustomHeaders map[string]string `yaml:"custom_headers"`
+}
+
+type SlackAlertingConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+type DiscordAlertingConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+type TeamsAlertingConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+type NtfyAlertingConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	TopicURL    string `yaml:"topic_url"`
+	AccessToken string `yaml:"access_token"`
+	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
+	Priority    int    `yaml:"priority" default:"3"`
+}
+
 type ServerConfig struct {
 	Server struct {
 		Host string `yaml:"host"`
@@ -45,11 +76,11 @@ type ServerConfig struct {
 	} `yaml:"task_queue"`
 	Dataset  DatasetConfig `yaml:"dataset"`
 	Alerting struct {
-		Webhook struct {
-			Enabled    bool   `yaml:"enabled"`
-			Url        string `yaml:"url"`
-			HmacSecret string `yaml:"hmac_secret"`
-		} `yaml:"webhook"`
+		Webhook WebhookAlertingConfig `yaml:"webhook"`
+		Slack   SlackAlertingConfig   `yaml:"slack"`
+		Discord DiscordAlertingConfig `yaml:"discord"`
+		Teams   TeamsAlertingConfig   `yaml:"teams"`
+		Ntfy    NtfyAlertingConfig    `yaml:"ntfy"`
 	} `yaml:"alerting"`
 	Sentry struct {
 		Dsn                   string  `yaml:"dsn"`

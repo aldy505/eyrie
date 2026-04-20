@@ -34,8 +34,6 @@ func NewProcessorWorker(db *sql.DB, subscriber *pubsub.Subscription, alerterProd
 	}
 }
 
-// Start begins the processing of incoming tasks.
-// It is a blocking call.
 func (w *ProcessorWorker) Start() error {
 	for {
 		select {
@@ -43,19 +41,14 @@ func (w *ProcessorWorker) Start() error {
 			return nil
 		default:
 			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
-
 			message, err := w.subscriber.Receive(ctx)
 			if err != nil {
 				slog.ErrorContext(ctx, "receiving message for processor queue", slog.String("error", err.Error()))
-				time.Sleep(time.Millisecond * 10)
+				time.Sleep(10 * time.Millisecond)
 				cancel()
 				continue
 			}
 
-			span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Processor Worker Start"))
-			ctx = span.Context()
-
-			// Process the message here.
 			var request CheckerSubmissionRequest
 			if err := json.Unmarshal(message.Body, &request); err != nil {
 				slog.ErrorContext(ctx, "unmarshaling processor message", slog.String("error", err.Error()))
@@ -65,130 +58,55 @@ func (w *ProcessorWorker) Start() error {
 					message.Ack()
 				}
 				cancel()
-				span.Finish()
 				continue
 			}
 
-			var region = "default"
-			if message.Metadata != nil {
-				if r, ok := message.Metadata["region"]; ok {
-					region = r
-				}
-			}
-
-			var monitor Monitor
-			var monitorFound bool
-			for _, m := range w.monitorConfig.Monitors {
-				if m.ID == request.MonitorID {
-					monitor = m
-					monitorFound = true
-					break
-				}
-			}
-
-			span.SetData("eyrie.monitor_id", request.MonitorID)
-			span.SetData("eyrie.region", region)
-			if hub := sentry.GetHubFromContext(ctx); hub != nil {
-				hub.Scope().SetTag("eyrie.monitor_id", request.MonitorID)
-				hub.Scope().SetTag("eyrie.region", region)
-			}
-
-			if !monitorFound {
-				if hub := sentry.GetHubFromContext(ctx); hub != nil {
-					hub.Scope().SetLevel(sentry.LevelWarning)
-					hub.CaptureMessage(fmt.Sprintf("Monitor not found for submission: %s", request.MonitorID))
-				}
-
-				slog.ErrorContext(ctx, "monitor not found for submission", slog.String("region", region), slog.String("monitor_id", request.MonitorID))
+			monitor, ok := w.findMonitor(request.MonitorID)
+			if !ok {
+				slog.ErrorContext(ctx, "monitor not found for submission", slog.String("monitor_id", request.MonitorID))
 				message.Ack()
 				cancel()
-				span.Finish()
 				continue
 			}
 
-			slog.InfoContext(ctx, "processing submission", slog.String("region", region), slog.String("submission_id", message.LoggableID))
-
-			// We look at the recent submissions, from similar time period (e.g., last 5 minutes) but from different regions.
-			// If we see a significant number of failures from multiple regions, we trigger an alert.
 			lookbackSince := time.Now().Add(-time.Duration(w.datasetConfig.ProcessingLookbackMinutes) * time.Minute)
 			historicalSubmissions, err := w.lookback(ctx, request.MonitorID, lookbackSince)
 			if err != nil {
-				if hub := sentry.GetHubFromContext(ctx); hub != nil {
-					hub.CaptureException(fmt.Errorf("looking back historical submissions for monitor %s: %w", request.MonitorID, err))
-				}
 				slog.ErrorContext(ctx, "looking back historical submissions", slog.String("error", err.Error()))
 				message.Ack()
 				cancel()
-				span.Finish()
 				continue
 			}
 
-			// Group submissions by minute buckets and pre-process statistics.
-			minuteInterval := time.Minute
-			buckets, earliestTime, latestTime := w.groupSubmissionByMinute(historicalSubmissions, minuteInterval, monitor)
+			buckets, earliestTime, latestTime := w.groupSubmissionByMinute(historicalSubmissions, time.Minute, monitor)
+			evaluation := w.evaluateLatestIncident(buckets, latestTime, earliestTime, time.Minute)
 
-			// Once we group the submission by minute, we can analyze whether there is a widespread failure.
-			// We can start tracking from `latestTime` to `earliestTime` using the minute interval.
-			// If a bucket is missing, we take that as zero submissions for that minute.
-			// Later, if on a certain bucket, there are > 50% failures from multiple regions, we trigger an alert.
-
-			// Analyze the pre-processed buckets to determine if an alert should be sent.
-			shouldAlert, alertReason, err := w.analyzeSubmissions(buckets, latestTime, earliestTime, minuteInterval)
+			previous, err := w.loadIncidentState(ctx, request.MonitorID)
 			if err != nil {
-				if hub := sentry.GetHubFromContext(ctx); hub != nil {
-					hub.CaptureException(fmt.Errorf("analyzing submissions for monitor %s: %w", request.MonitorID, err))
-				}
-				slog.ErrorContext(ctx, "analyzing submissions for alerting", slog.String("error", err.Error()))
+				slog.ErrorContext(ctx, "loading incident state", slog.String("error", err.Error()))
 				message.Ack()
 				cancel()
-				span.Finish()
 				continue
 			}
 
-			if shouldAlert {
-				slog.InfoContext(ctx, "triggering alert for monitor", slog.String("monitor_id", request.MonitorID), slog.String("reason", alertReason))
-
-				alert := AlertMessage{
-					MonitorID:  request.MonitorID,
-					Name:       monitor.Name,
-					Reason:     alertReason,
-					OccurredAt: time.Now().UTC(),
-				}
-
-				alertBody, err := json.Marshal(alert)
-				if err != nil {
-					if hub := sentry.GetHubFromContext(ctx); hub != nil {
-						hub.CaptureException(fmt.Errorf("marshaling alert message for monitor %s: %w", request.MonitorID, err))
-					}
-					slog.ErrorContext(ctx, "marshaling alert message", slog.String("error", err.Error()))
+			if !previous.Equal(evaluation) {
+				if err := w.storeIncidentState(ctx, request.MonitorID, evaluation); err != nil {
+					slog.ErrorContext(ctx, "storing incident state", slog.String("error", err.Error()))
 					message.Ack()
 					cancel()
-					span.Finish()
 					continue
 				}
 
-				err = w.alerterProducer.Send(ctx, &pubsub.Message{
-					Body: alertBody,
-					Metadata: map[string]string{
-						"monitor_id": request.MonitorID,
-					},
-				})
-				if err != nil {
-					if hub := sentry.GetHubFromContext(ctx); hub != nil {
-						hub.CaptureException(fmt.Errorf("sending alert message for monitor %s: %w", request.MonitorID, err))
-					}
-					slog.ErrorContext(ctx, "sending alert message", slog.String("error", err.Error()))
+				if err := w.publishAlert(ctx, monitor, evaluation, previous); err != nil {
+					slog.ErrorContext(ctx, "publishing alert", slog.String("error", err.Error()))
 					message.Ack()
 					cancel()
-					span.Finish()
 					continue
 				}
 			}
 
-			// Acknowledge the message after processing.
 			message.Ack()
 			cancel()
-			span.Finish()
 		}
 	}
 }
@@ -198,11 +116,16 @@ func (w *ProcessorWorker) Stop() error {
 	return nil
 }
 
-func (w *ProcessorWorker) lookback(ctx context.Context, monitorId string, since time.Time) ([]MonitorHistorical, error) {
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Lookback Monitor Historical"))
-	ctx = span.Context()
-	defer span.Finish()
+func (w *ProcessorWorker) findMonitor(monitorID string) (Monitor, bool) {
+	for _, monitor := range w.monitorConfig.Monitors {
+		if monitor.ID == monitorID {
+			return monitor, true
+		}
+	}
+	return Monitor{}, false
+}
 
+func (w *ProcessorWorker) lookback(ctx context.Context, monitorID string, since time.Time) ([]MonitorHistorical, error) {
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("getting db connection: %w", err)
@@ -210,10 +133,10 @@ func (w *ProcessorWorker) lookback(ctx context.Context, monitorId string, since 
 	defer conn.Close()
 
 	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id, region, status_code, latency_ms, response_body, tls_version, tls_cipher, tls_expiry, created_at
+		SELECT monitor_id, region, probe_type, success, failure_reason, status_code, latency_ms, response_body, tls_version, tls_cipher, tls_expiry, created_at
 		FROM monitor_historical
 		WHERE monitor_id = ? AND created_at >= ? AND created_at <= ?
-	`, monitorId, since, time.Now())
+	`, monitorID, since, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("querying monitor historical: %w", err)
 	}
@@ -221,44 +144,44 @@ func (w *ProcessorWorker) lookback(ctx context.Context, monitorId string, since 
 
 	var results []MonitorHistorical
 	for rows.Next() {
-		var mh MonitorHistorical
-		if err := rows.Scan(&mh.MonitorID, &mh.Region, &mh.StatusCode, &mh.LatencyMs, &mh.ResponseBody, &mh.TlsVersion, &mh.TlsCipher, &mh.TlsExpiry, &mh.CreatedAt); err != nil {
+		var historical MonitorHistorical
+		if err := rows.Scan(
+			&historical.MonitorID,
+			&historical.Region,
+			&historical.ProbeType,
+			&historical.Success,
+			&historical.FailureReason,
+			&historical.StatusCode,
+			&historical.LatencyMs,
+			&historical.ResponseBody,
+			&historical.TlsVersion,
+			&historical.TlsCipher,
+			&historical.TlsExpiry,
+			&historical.CreatedAt,
+		); err != nil {
 			return nil, fmt.Errorf("scanning monitor historical: %w", err)
 		}
-		results = append(results, mh)
+		results = append(results, historical)
 	}
 
 	return results, nil
 }
 
-// SubmissionBucket represents aggregated submission data for a time bucket
 type SubmissionBucket struct {
 	TimestampMinute time.Time
-	// Regions keeps track of unique regions in this bucket.
-	// The value of the map represents whether the region has a successful check.
-	Regions map[string]bool
-	// FailureCount counts the number of regions that are considered failed
-	FailureCount int
-	// TotalCount counts the total number of regions in this bucket
-	TotalCount int
+	Regions         map[string]bool
+	FailureCount    int
+	TotalCount      int
 }
 
 func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorical, interval time.Duration, monitor Monitor) (buckets map[time.Time]SubmissionBucket, earliestTime time.Time, latestTime time.Time) {
-	// Earliest means the oldest time. Latest means the most recent time.
-	earliestTime = time.Now().UTC().Add(100 * 365 * 24 * time.Hour) // Far future time
+	earliestTime = time.Now().UTC().Add(100 * 365 * 24 * time.Hour)
 	latestTime = time.Now().UTC().Add(-100 * 365 * 24 * time.Hour)
 
-	// First, group raw submissions by time bucket
 	rawBuckets := make(map[time.Time][]MonitorHistorical)
-
 	for _, submission := range submissions {
 		bucketTime := submission.CreatedAt.Truncate(interval)
 		rawBuckets[bucketTime] = append(rawBuckets[bucketTime], submission)
-
-		// Track earliest and latest time.
-		// Since earliestTime is initialized to a far future time, the first bucketTime
-		// will always update earliestTime. latestTime starts at time.Now() and is only
-		// updated when bucketTime is more recent than the current latestTime.
 		if bucketTime.Before(earliestTime) {
 			earliestTime = bucketTime
 		}
@@ -267,71 +190,37 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 		}
 	}
 
-	// Now pre-process each bucket to calculate statistics
 	buckets = make(map[time.Time]SubmissionBucket)
-
 	for bucketTime, bucketSubmissions := range rawBuckets {
 		submissionBucket := SubmissionBucket{
 			TimestampMinute: bucketTime,
 			Regions:         make(map[string]bool),
-			FailureCount:    0,
-			TotalCount:      0,
 		}
 
-		// We want to accumulate the regions and failure counts.
-		// We also want to make sure that for a bucket that has multiple
-		// submissions from the same region would be counted correctly.
-		type RegionSubmission struct {
-			TotalCount int
-			Failures   int
+		type regionSubmission struct {
+			totalCount int
+			failures   int
 		}
-		regionSubmissionCount := make(map[string]RegionSubmission)
+		regionSubmissionCount := make(map[string]regionSubmission)
 
 		for _, submission := range bucketSubmissions {
-			isSuccessful := slices.Contains(monitor.ExpectedStatusCodes, submission.StatusCode)
-			oldRegionSubmission, exists := regionSubmissionCount[submission.Region]
-
-			if !exists {
-				failures := 0
-				if !isSuccessful {
-					failures = 1
-				}
-				regionSubmissionCount[submission.Region] = RegionSubmission{TotalCount: 1, Failures: failures}
-			} else {
-				failures := oldRegionSubmission.Failures
-				if !isSuccessful {
-					failures++
-				}
-				regionSubmissionCount[submission.Region] = RegionSubmission{
-					TotalCount: oldRegionSubmission.TotalCount + 1,
-					Failures:   failures,
-				}
+			isSuccessful := monitor.IsSuccessfulStatus(submission.StatusCode, submission.Success)
+			existing := regionSubmissionCount[submission.Region]
+			if !isSuccessful {
+				existing.failures++
 			}
+			existing.totalCount++
+			regionSubmissionCount[submission.Region] = existing
 		}
 
-		// Now process each region's aggregated data
-		for region, rs := range regionSubmissionCount {
-			switch rs.Failures {
-			case 0:
-				// All successful submissions in this region
-				submissionBucket.Regions[region] = true
-			case rs.TotalCount:
-				// All failed submissions in this region
-				submissionBucket.Regions[region] = false
-				submissionBucket.FailureCount += 1
-			default:
-				// Mixed successes and failures in this region; use a failure-rate threshold.
-				perRegionFailureRate := float64(rs.Failures) / float64(rs.TotalCount)
-				if perRegionFailureRate >= (w.datasetConfig.PerRegionFailureThresholdPercent / 100.0) {
-					// Consider this region as failed if 40% or more of submissions failed
-					submissionBucket.Regions[region] = false
-					submissionBucket.FailureCount += 1
-				} else {
-					// Consider this region as successful
-					submissionBucket.Regions[region] = true
-				}
+		for region, regionStats := range regionSubmissionCount {
+			perRegionFailureRate := float64(regionStats.failures) / float64(regionStats.totalCount)
+			success := perRegionFailureRate < (w.datasetConfig.PerRegionFailureThresholdPercent / 100.0)
+			submissionBucket.Regions[region] = success
+			submissionBucket.TotalCount++
+			if !success {
+				submissionBucket.FailureCount++
 			}
-			submissionBucket.TotalCount += 1
 		}
 
 		buckets[bucketTime] = submissionBucket
@@ -340,16 +229,66 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 	return buckets, earliestTime, latestTime
 }
 
-func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (shouldAlert bool, alertReason string, err error) {
-	// We analyze the buckets to see if there is a widespread failure,
-	// starting from the latestTime to earliestTime.
-	// If the state changes from healthy to unhealthy for the latest bucket,
-	// we trigger an alert. And vice versa, if the state changes from unhealthy
-	// to healthy for the latest bucket, we can also trigger a recovery alert.
-	// But, if there is no state change, we do nothing.
-	//
-	// We still need to iterate through all buckets from the latestTime because
-	// we can't know for sure if there are buckets with 0 TotalCount in between.
+func (w *ProcessorWorker) evaluateLatestIncident(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) IncidentEvaluation {
+	if len(buckets) == 0 || earliestTime.After(latestTime) || minuteInterval <= 0 {
+		return HealthyIncidentEvaluation()
+	}
+
+	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
+		bucket, ok := buckets[t]
+		if !ok || bucket.TotalCount == 0 {
+			continue
+		}
+
+		failedRegions := make([]string, 0, len(bucket.Regions))
+		for region, success := range bucket.Regions {
+			if !success {
+				failedRegions = append(failedRegions, region)
+			}
+		}
+		slices.Sort(failedRegions)
+
+		if len(failedRegions) == 0 {
+			return HealthyIncidentEvaluation()
+		}
+
+		failureRate := float64(len(failedRegions)) / float64(bucket.TotalCount)
+		switch {
+		case bucket.TotalCount == len(failedRegions):
+			scope := MonitorScopeLocal
+			if bucket.TotalCount > 1 {
+				scope = MonitorScopeGlobal
+			}
+			return IncidentEvaluation{
+				Status:          MonitorStatusDown,
+				Scope:           scope,
+				Reason:          fmt.Sprintf("Probe failures detected in all reporting regions (%s)", strings.Join(failedRegions, ", ")),
+				AffectedRegions: failedRegions,
+			}
+		case bucket.TotalCount > 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0:
+			return IncidentEvaluation{
+				Status:          MonitorStatusDown,
+				Scope:           MonitorScopeGlobal,
+				Reason:          fmt.Sprintf("Multi-region outage detected across %d/%d regions (%s)", len(failedRegions), bucket.TotalCount, strings.Join(failedRegions, ", ")),
+				AffectedRegions: failedRegions,
+			}
+		default:
+			return IncidentEvaluation{
+				Status:          MonitorStatusDegraded,
+				Scope:           MonitorScopeLocal,
+				Reason:          fmt.Sprintf("Regional degradation detected in %s", strings.Join(failedRegions, ", ")),
+				AffectedRegions: failedRegions,
+			}
+		}
+	}
+
+	return HealthyIncidentEvaluation()
+}
+
+func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (bool, string, error) {
+	if earliestTime.After(latestTime) || minuteInterval <= 0 {
+		return false, "", nil
+	}
 
 	type HealthState int
 	const (
@@ -358,57 +297,35 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBuc
 		StateUnhealthySingleRegion
 	)
 
-	// Track state transitions through the time series
 	type BucketAnalysis struct {
-		bucketTime  time.Time
 		state       HealthState
 		failureRate float64
 		regionCount int
 		regionNames []string
-		isLatest    bool
 	}
 
 	var analyses []BucketAnalysis
 
-	// Safeguard against invalid input that could cause a non-terminating loop.
-	// We expect earliestTime <= latestTime and a positive minuteInterval so that
-	// iterating with t = t.Add(-minuteInterval) makes progress toward earliestTime.
-	if earliestTime.After(latestTime) || minuteInterval <= 0 {
-		slog.Warn("analyzeSubmissions: invalid time range or minute interval; skipping analysis",
-			slog.String("earliest_time", earliestTime.String()),
-			slog.String("latest_time", latestTime.String()),
-			slog.Duration("minute_interval", minuteInterval))
-		return false, "", nil
-	}
-
-	// Analyze all buckets from latest to earliest
 	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
 		submissionBucket, exists := buckets[t]
-
-		// Skip buckets with no data
-		if !exists {
+		if !exists || submissionBucket.TotalCount == 0 {
 			continue
 		}
 
-		if submissionBucket.TotalCount == 0 {
-			continue
-		}
-
-		isLatest := t.Equal(latestTime)
 		failureRate := float64(submissionBucket.FailureCount) / float64(submissionBucket.TotalCount)
 		regionCount := len(submissionBucket.Regions)
 
 		var currentState HealthState
 		var failedRegions []string
+		for region, success := range submissionBucket.Regions {
+			if !success {
+				failedRegions = append(failedRegions, region)
+			}
+		}
+		slices.Sort(failedRegions)
 
-		// Determine the health state for this bucket
 		if regionCount > 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0 {
 			currentState = StateUnhealthyMultiRegion
-			for region, success := range submissionBucket.Regions {
-				if !success {
-					failedRegions = append(failedRegions, region)
-				}
-			}
 		} else if regionCount == 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0 {
 			currentState = StateUnhealthySingleRegion
 		} else {
@@ -416,64 +333,133 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBuc
 		}
 
 		analyses = append(analyses, BucketAnalysis{
-			bucketTime:  t,
 			state:       currentState,
 			failureRate: failureRate,
 			regionCount: regionCount,
 			regionNames: failedRegions,
-			isLatest:    isLatest,
 		})
 	}
 
-	// If no data was analyzed, return no alert
 	if len(analyses) == 0 {
 		return false, "", nil
 	}
 
-	// Now evaluate the latest bucket state against the historical state
-	latestAnalysis := analyses[0] // First element is the latest because we iterate backwards
-
-	// Determine the previous state (the state immediately before the latest bucket)
-	var previousState HealthState = StateHealthy
+	latestAnalysis := analyses[0]
+	previousState := StateHealthy
 	if len(analyses) > 1 {
 		previousState = analyses[1].state
 	}
 
 	switch latestAnalysis.state {
 	case StateUnhealthyMultiRegion:
-		// Multi-region failure in latest bucket
 		if previousState == StateHealthy {
-			// State changed from healthy to unhealthy - trigger alert
 			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from %d regions (%s)",
 				latestAnalysis.failureRate*100,
 				latestAnalysis.regionCount,
 				strings.Join(latestAnalysis.regionNames, ", ")), nil
 		}
-		// Already unhealthy, no alert
 		return false, "", nil
-
 	case StateUnhealthySingleRegion:
-		// Single-region failure in latest bucket
-		// We only trigger alert for consecutive single-region failures to avoid
-		// false positives from transient single-region issues
 		if previousState == StateUnhealthySingleRegion {
-			// Consecutive single-region failure detected, trigger alert
 			return true, fmt.Sprintf("High failure rate detected: %.2f%% failures from single region",
 				latestAnalysis.failureRate*100), nil
 		}
-		// First occurrence of single-region failure or previous state was different
 		return false, "", nil
-
 	case StateHealthy:
-		// Latest bucket is healthy
 		if previousState != StateHealthy {
-			// State changed from unhealthy to healthy - trigger recovery alert
 			return true, "Monitor has recovered and is now healthy", nil
 		}
-		// Was already healthy, no alert
+		return false, "", nil
+	default:
 		return false, "", nil
 	}
+}
 
-	// Default: no alert
-	return false, "", nil
+func (w *ProcessorWorker) loadIncidentState(ctx context.Context, monitorID string) (IncidentEvaluation, error) {
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return HealthyIncidentEvaluation(), fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	var status string
+	var scope string
+	var regions string
+	var reason string
+	err = conn.QueryRowContext(ctx, `
+		SELECT status, scope, affected_regions, reason
+		FROM monitor_incident_state
+		WHERE monitor_id = ?
+	`, monitorID).Scan(&status, &scope, &regions, &reason)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return HealthyIncidentEvaluation(), nil
+		}
+		return HealthyIncidentEvaluation(), fmt.Errorf("querying incident state: %w", err)
+	}
+
+	return IncidentEvaluation{
+		Status:          status,
+		Scope:           scope,
+		Reason:          reason,
+		AffectedRegions: ParseRegionsJSON(regions),
+	}, nil
+}
+
+func (w *ProcessorWorker) storeIncidentState(ctx context.Context, monitorID string, evaluation IncidentEvaluation) error {
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	now := time.Now().UTC()
+	_, err = conn.ExecContext(ctx, `
+		INSERT INTO monitor_incident_state (monitor_id, status, scope, affected_regions, reason, last_transition_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (monitor_id) DO UPDATE
+		SET
+			status = EXCLUDED.status,
+			scope = EXCLUDED.scope,
+			affected_regions = EXCLUDED.affected_regions,
+			reason = EXCLUDED.reason,
+			last_transition_at = EXCLUDED.last_transition_at,
+			updated_at = EXCLUDED.updated_at
+	`, monitorID, evaluation.Status, evaluation.Scope, evaluation.RegionsJSON(), evaluation.Reason, now, now)
+	if err != nil {
+		return fmt.Errorf("upserting incident state: %w", err)
+	}
+
+	return nil
+}
+
+func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, current IncidentEvaluation, previous IncidentEvaluation) error {
+	alertReason := current.Reason
+	if current.Status == MonitorStatusHealthy && previous.Status != MonitorStatusHealthy {
+		alertReason = fmt.Sprintf("Monitor recovered from %s %s", previous.Scope, previous.Status)
+	}
+
+	alert := AlertMessage{
+		MonitorID:       monitor.ID,
+		Name:            monitor.Name,
+		Status:          current.Status,
+		Scope:           current.Scope,
+		Reason:          alertReason,
+		OccurredAt:      time.Now().UTC(),
+		AffectedRegions: current.AffectedRegions,
+	}
+
+	alertBody, err := json.Marshal(alert)
+	if err != nil {
+		return fmt.Errorf("marshaling alert message: %w", err)
+	}
+
+	return w.alerterProducer.Send(ctx, &pubsub.Message{
+		Body: alertBody,
+		Metadata: map[string]string{
+			"monitor_id": monitor.ID,
+			"status":     current.Status,
+			"scope":      current.Scope,
+		},
+	})
 }
