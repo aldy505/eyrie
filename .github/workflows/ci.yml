@@ -74,6 +74,7 @@ jobs:
       - name: Build frontend
         run: |
           npm run build
+          rm -rf node_modules
         working-directory: frontend
       - name: Run tests
         run: |

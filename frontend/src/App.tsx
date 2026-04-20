@@ -119,13 +119,7 @@ function getWorstStatus(statuses: string[]) {
   return "healthy";
 }
 
-function UptimeBars({
-  monitor,
-  metadata,
-}: {
-  monitor: SingleMonitor;
-  metadata: Metadata;
-}) {
+function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: Metadata }) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5">
@@ -133,11 +127,7 @@ function UptimeBars({
           const colorStartsAt = metadata.retention_days - monitor.age;
           if (index < colorStartsAt) {
             return (
-              <div
-                key={index}
-                className="h-8 w-2.5 rounded-full bg-white/10"
-                title="No data"
-              />
+              <div key={index} className="h-8 w-2.5 rounded-full bg-white/10" title="No data" />
             );
           }
 
@@ -154,7 +144,9 @@ function UptimeBars({
             title = `Degraded: ${downtime?.duration_minutes ?? 0} minutes`;
           }
 
-          return <div key={index} className={`h-8 w-2.5 rounded-full ${className}`} title={title} />;
+          return (
+            <div key={index} className={`h-8 w-2.5 rounded-full ${className}`} title={title} />
+          );
         })}
       </div>
       <div className="flex justify-between text-[11px] uppercase tracking-[0.2em] text-slate-400">
@@ -212,10 +204,13 @@ function MonitorCard({
   regionMap: Record<string, RegionData["monitors"]>;
 }) {
   const children = monitor.monitors;
-  const childIncidents = children.map((item) => incidents.get(item.id)).filter(Boolean) as Incident[];
+  const childIncidents = children
+    .map((item) => incidents.get(item.id))
+    .filter(Boolean) as Incident[];
   const worstStatus = getWorstStatus(childIncidents.map((item) => item.status));
   const globalIssue = childIncidents.find((item) => item.scope === "global");
-  const scope = globalIssue?.scope ?? childIncidents.find((item) => item.scope === "local")?.scope ?? "healthy";
+  const scope =
+    globalIssue?.scope ?? childIncidents.find((item) => item.scope === "local")?.scope ?? "healthy";
   const averageLatency =
     children.length > 0
       ? Math.round(children.reduce((sum, item) => sum + item.response_time_ms, 0) / children.length)
@@ -227,14 +222,20 @@ function MonitorCard({
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-2xl font-semibold text-white">{monitor.name}</h2>
-            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[worstStatus] ?? statusTone.healthy}`}>
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[worstStatus] ?? statusTone.healthy}`}
+            >
               {formatStatus(worstStatus)}
             </span>
-            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[scope] ?? scopeTone.healthy}`}>
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[scope] ?? scopeTone.healthy}`}
+            >
               {formatScope(scope)}
             </span>
           </div>
-          {monitor.description && <p className="max-w-3xl text-sm text-slate-300">{monitor.description}</p>}
+          {monitor.description && (
+            <p className="max-w-3xl text-sm text-slate-300">{monitor.description}</p>
+          )}
         </div>
         <div className="grid grid-cols-2 gap-3 text-sm text-slate-300 md:grid-cols-3">
           <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
@@ -257,7 +258,10 @@ function MonitorCard({
           const incident = incidents.get(child.id);
           const regions = regionMap[child.id] ?? [];
           return (
-            <article key={child.id} className="rounded-3xl border border-white/10 bg-white/[0.03] p-5">
+            <article
+              key={child.id}
+              className="rounded-3xl border border-white/10 bg-white/[0.03] p-5"
+            >
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center gap-3">
@@ -276,7 +280,9 @@ function MonitorCard({
                       {incident?.probe_type ?? "http"}
                     </span>
                   </div>
-                  {child.description && <p className="text-sm text-slate-300">{child.description}</p>}
+                  {child.description && (
+                    <p className="text-sm text-slate-300">{child.description}</p>
+                  )}
                   <div className="flex flex-wrap gap-4 text-sm text-slate-300">
                     <span className="inline-flex items-center gap-2">
                       <Activity className="h-4 w-4 text-emerald-300" />
@@ -293,7 +299,9 @@ function MonitorCard({
                   </div>
                 </div>
                 <div className="max-w-xl space-y-2 text-sm text-slate-300">
-                  <p className="font-medium text-white">{incident?.reason || "No active incident."}</p>
+                  <p className="font-medium text-white">
+                    {incident?.reason || "No active incident."}
+                  </p>
                   {incident?.affected_regions.length ? (
                     <p>Affected regions: {incident.affected_regions.join(", ")}</p>
                   ) : (
@@ -304,11 +312,15 @@ function MonitorCard({
 
               <div className="mt-5 grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
                 <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
-                  <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">Availability trend</p>
+                  <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
+                    Availability trend
+                  </p>
                   <UptimeBars monitor={child} metadata={metadata} />
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
-                  <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">Regional health</p>
+                  <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
+                    Regional health
+                  </p>
                   <RegionList regions={regions} incident={incident} />
                 </div>
               </div>
@@ -344,7 +356,9 @@ function App() {
         document.title = parsedMetadata.title;
 
         const uniqueMonitorIds = Array.from(
-          new Set(parsedData.monitors.flatMap((group) => group.monitors.map((monitor) => monitor.id))),
+          new Set(
+            parsedData.monitors.flatMap((group) => group.monitors.map((monitor) => monitor.id)),
+          ),
         );
 
         return Promise.all(
