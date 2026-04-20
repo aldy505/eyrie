@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,7 +41,7 @@ type ServerOptions struct {
 	IngesterProducer  *pubsub.Topic
 }
 
-//go:embed frontend
+//go:embed frontend/dist
 var frontendFilesystem embed.FS
 
 func NewServer(options ServerOptions) (*Server, error) {
@@ -57,11 +56,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	// Create a sub-filesystem rooted at frontend/dist so we can reference index.html directly
 	distFS, err := fs.Sub(frontendFilesystem, "frontend/dist")
 	if err != nil {
-		if _, statErr := os.Stat("frontend/dist"); statErr == nil {
-			distFS = os.DirFS("frontend/dist")
-		} else {
-			distFS = placeholderFrontendFS{}
-		}
+		return nil, fmt.Errorf("creating frontend sub-filesystem: %w", err)
 	}
 
 	sentryMiddleware := sentryhttp.New(sentryhttp.Options{
@@ -443,11 +438,19 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 	for _, metadata := range monitorMetadata {
 		monitorConfig, err := s.findMonitorConfig(metadata.ID)
 		if err != nil {
-			continue
+			slog.ErrorContext(ctx, "failed to load monitor config for incidents response", "monitor_id", metadata.ID, "error", err)
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
+			return
 		}
 		state, err := s.fetchIncidentState(ctx, metadata.ID)
 		if err != nil {
-			continue
+			slog.ErrorContext(ctx, "failed to load incident state for monitor", "monitor_id", metadata.ID, "error", err)
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
+			return
 		}
 		incidents = append(incidents, MonitorIncidentSummary{
 			MonitorID:        metadata.ID,

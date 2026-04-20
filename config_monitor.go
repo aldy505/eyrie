@@ -20,7 +20,7 @@ const (
 
 type MonitorHTTPConfig struct {
 	Method              string            `yaml:"method" json:"method" default:"GET"`
-	SkipTLSVerify       bool              `yaml:"skip_tls_verify" json:"skip_tls_verify" default:"false"`
+	SkipTLSVerify       *bool             `yaml:"skip_tls_verify" json:"skip_tls_verify,omitempty"`
 	URL                 string            `yaml:"url" json:"url"`
 	Headers             map[string]string `yaml:"headers" json:"headers"`
 	ExpectedStatusCodes []int             `yaml:"expected_status_codes" json:"-"`
@@ -73,7 +73,7 @@ type Monitor struct {
 	TimeoutSeconds      null.Int          `yaml:"timeout_seconds" json:"timeout_seconds"`
 	JqAssertion         null.String       `yaml:"jq_assertion" json:"-"`
 
-	HTTP     MonitorHTTPConfig     `yaml:"http" json:"http"`
+	HTTP     *MonitorHTTPConfig    `yaml:"http" json:"http,omitempty"`
 	TCP      MonitorTCPConfig      `yaml:"tcp" json:"tcp"`
 	ICMP     MonitorICMPConfig     `yaml:"icmp" json:"icmp"`
 	Redis    MonitorRedisConfig    `yaml:"redis" json:"redis"`
@@ -112,7 +112,10 @@ func (m Monitor) EffectiveType() MonitorType {
 }
 
 func (m Monitor) EffectiveHTTP() MonitorHTTPConfig {
-	cfg := m.HTTP
+	cfg := MonitorHTTPConfig{}
+	if m.HTTP != nil {
+		cfg = *m.HTTP
+	}
 	if cfg.Method == "" {
 		cfg.Method = m.Method
 	}
@@ -137,10 +140,15 @@ func (m Monitor) EffectiveHTTP() MonitorHTTPConfig {
 	if !cfg.JqAssertion.Valid {
 		cfg.JqAssertion = m.JqAssertion
 	}
-	if !cfg.SkipTLSVerify {
-		cfg.SkipTLSVerify = m.SkipTLSVerify
+	if cfg.SkipTLSVerify == nil {
+		legacySkipTLSVerify := m.SkipTLSVerify
+		cfg.SkipTLSVerify = &legacySkipTLSVerify
 	}
 	return cfg
+}
+
+func (c MonitorHTTPConfig) SkipTLSVerifyValue() bool {
+	return c.SkipTLSVerify != nil && *c.SkipTLSVerify
 }
 
 func (m Monitor) EffectiveTimeout(defaultSeconds time.Duration) time.Duration {

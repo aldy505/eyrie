@@ -4,6 +4,14 @@ ALTER TABLE monitor_historical ADD COLUMN IF NOT EXISTS probe_type VARCHAR DEFAU
 ALTER TABLE monitor_historical ADD COLUMN IF NOT EXISTS success BOOLEAN DEFAULT false;
 ALTER TABLE monitor_historical ADD COLUMN IF NOT EXISTS failure_reason TEXT;
 
+UPDATE monitor_historical
+SET probe_type = 'http'
+WHERE probe_type IS NULL OR probe_type = '';
+
+UPDATE monitor_historical
+SET success = status_code BETWEEN 200 AND 399
+WHERE probe_type = 'http';
+
 CREATE TABLE IF NOT EXISTS monitor_historical_region_daily_aggregate (
     monitor_id VARCHAR(255) NOT NULL,
     region VARCHAR(255) NOT NULL,

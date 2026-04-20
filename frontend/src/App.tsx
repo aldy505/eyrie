@@ -363,7 +363,7 @@ function App() {
 
         return Promise.all(
           uniqueMonitorIds.map((monitorId) =>
-            fetch(`${BASE_URL}/uptime-data-by-region?monitorId=${monitorId}`)
+            fetch(`${BASE_URL}/uptime-data-by-region?monitorId=${encodeURIComponent(monitorId)}`)
               .then((response) => response.json())
               .then((json) => ({ monitorId, payload: regionSchema.parse(json) })),
           ),

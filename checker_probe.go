@@ -69,7 +69,7 @@ func (c *Checker) probeHTTP(ctx context.Context, monitor Monitor) CheckerSubmiss
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-			TLSClientConfig:       &tls.Config{InsecureSkipVerify: httpConfig.SkipTLSVerify},
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: httpConfig.SkipTLSVerifyValue()},
 		},
 		Timeout: timeout,
 	}
@@ -133,7 +133,7 @@ func (c *Checker) probeTCP(ctx context.Context, monitor Monitor) CheckerSubmissi
 	if monitor.TCP.UseTLS {
 		tlsConn := tls.Client(conn, &tls.Config{
 			InsecureSkipVerify: monitor.TCP.SkipTLSVerify,
-			ServerName:         strings.Split(monitor.TCP.Address, ":")[0],
+			ServerName:         serverNameForAddress(monitor.TCP.Address),
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			submission.LatencyMs = time.Since(start).Milliseconds()
@@ -312,4 +312,12 @@ func sendRedisCommand(conn net.Conn, command string, arguments ...string) error 
 		return errors.New(strings.TrimSpace(string(reply[:n])))
 	}
 	return nil
+}
+
+func serverNameForAddress(address string) string {
+	serverName := address
+	if host, _, err := net.SplitHostPort(address); err == nil {
+		serverName = host
+	}
+	return strings.TrimPrefix(strings.TrimSuffix(serverName, "]"), "[")
 }

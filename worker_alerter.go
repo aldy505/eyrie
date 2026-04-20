@@ -71,16 +71,22 @@ func (w *AlerterWorker) Start() error {
 
 			sendCtx, sendCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			var sendErr error
+			deliveredCount := 0
 			for _, alerter := range w.alerters {
 				if err := alerter.Send(sendCtx, alert); err != nil {
 					sendErr = errors.Join(sendErr, err)
+					continue
 				}
+				deliveredCount++
 			}
 			sendCancel()
 
 			if sendErr != nil {
-				slog.Error("sending alert", slog.String("error", sendErr.Error()))
-				if message.Nackable() {
+				slog.Error("sending alert",
+					slog.String("error", sendErr.Error()),
+					slog.Int("delivered_count", deliveredCount),
+					slog.Int("alerter_count", len(w.alerters)))
+				if deliveredCount == 0 && message.Nackable() {
 					message.Nack()
 				} else {
 					message.Ack()
