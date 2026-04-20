@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -10,26 +11,29 @@ import (
 )
 
 type AlertMessage struct {
-	MonitorID  string    `json:"monitor_id"`
-	Name       string    `json:"name"`
-	Reason     string    `json:"reason"`
-	OccurredAt time.Time `json:"occurred_at"`
+	MonitorID       string    `json:"monitor_id"`
+	Name            string    `json:"name"`
+	Status          string    `json:"status"`
+	Scope           string    `json:"scope"`
+	Reason          string    `json:"reason"`
+	OccurredAt      time.Time `json:"occurred_at"`
+	AffectedRegions []string  `json:"affected_regions"`
 }
 
 type AlerterWorker struct {
 	subscriber *pubsub.Subscription
+	alerters   []Alerter
 	shutdown   chan struct{}
 }
 
-func NewAlerterWorker(subscriber *pubsub.Subscription) *AlerterWorker {
+func NewAlerterWorker(subscriber *pubsub.Subscription, alerters []Alerter) *AlerterWorker {
 	return &AlerterWorker{
 		subscriber: subscriber,
+		alerters:   alerters,
 		shutdown:   make(chan struct{}),
 	}
 }
 
-// Start begins the alerting process, listening for new messages.
-// It is a blocking call.
 func (w *AlerterWorker) Start() error {
 	for {
 		select {
@@ -37,19 +41,17 @@ func (w *AlerterWorker) Start() error {
 			return nil
 		default:
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
 			message, err := w.subscriber.Receive(ctx)
+			cancel()
 			if err != nil {
-				slog.ErrorContext(ctx, "receiving message for alert queue", slog.String("error", err.Error()))
-				time.Sleep(time.Millisecond * 10)
+				slog.Error("receiving message for alert queue", slog.String("error", err.Error()))
+				time.Sleep(10 * time.Millisecond)
 				continue
 			}
 
-			// Process the message here.
 			var alert AlertMessage
 			if err := json.Unmarshal(message.Body, &alert); err != nil {
-				slog.ErrorContext(ctx, "unmarshaling alert message", slog.String("error", err.Error()))
+				slog.Error("unmarshaling alert message", slog.String("error", err.Error()))
 				if message.Nackable() {
 					message.Nack()
 				} else {
@@ -58,10 +60,33 @@ func (w *AlerterWorker) Start() error {
 				continue
 			}
 
-			slog.InfoContext(ctx, "received alert", slog.String("monitor_id", alert.MonitorID), slog.String("name", alert.Name), slog.String("reason", alert.Reason), slog.Time("occurred_at", alert.OccurredAt))
+			if len(w.alerters) == 0 {
+				slog.Info("alert received without configured delivery targets",
+					slog.String("monitor_id", alert.MonitorID),
+					slog.String("status", alert.Status),
+					slog.String("scope", alert.Scope))
+				message.Ack()
+				continue
+			}
 
-			// Here you would add the logic to actually send the alert (e.g., email, SMS, etc.)
-			// TODO: Implement this
+			sendCtx, sendCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			var sendErr error
+			for _, alerter := range w.alerters {
+				if err := alerter.Send(sendCtx, alert); err != nil {
+					sendErr = errors.Join(sendErr, err)
+				}
+			}
+			sendCancel()
+
+			if sendErr != nil {
+				slog.Error("sending alert", slog.String("error", sendErr.Error()))
+				if message.Nackable() {
+					message.Nack()
+				} else {
+					message.Ack()
+				}
+				continue
+			}
 
 			message.Ack()
 		}

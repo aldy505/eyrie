@@ -9,6 +9,9 @@ import (
 type MonitorHistorical struct {
 	MonitorID                 string      `db:"monitor_id"`
 	Region                    string      `db:"region"`
+	ProbeType                 string      `db:"probe_type"`
+	Success                   bool        `db:"success"`
+	FailureReason             null.String `db:"failure_reason"`
 	StatusCode                int         `db:"status_code"`
 	LatencyMs                 int         `db:"latency_ms"`
 	ResponseBody              null.String `db:"response_body"`
@@ -26,9 +29,20 @@ type MonitorHistorical struct {
 
 type MonitorHistoricalDailyAggregate struct {
 	MonitorID    string    `db:"monitor_id"`
+	Region       string    `db:"region"`
 	Date         time.Time `db:"date"`
 	AvgLatencyMs int       `db:"avg_latency_ms"`
 	MinLatencyMs int       `db:"min_latency_ms"`
 	MaxLatencyMs int       `db:"max_latency_ms"`
 	SuccessRate  int       `db:"success_rate"`
+}
+
+type MonitorIncidentState struct {
+	MonitorID        string    `db:"monitor_id"`
+	Status           string    `db:"status"`
+	Scope            string    `db:"scope"`
+	AffectedRegions  string    `db:"affected_regions"`
+	Reason           string    `db:"reason"`
+	LastTransitionAt time.Time `db:"last_transition_at"`
+	UpdatedAt        time.Time `db:"updated_at"`
 }

@@ -3,15 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"sync"
 	"time"
@@ -209,13 +205,6 @@ func (c *Checker) registerToUpstream(ctx context.Context) error {
 }
 
 func (c *Checker) performMonitorCheck(ctx context.Context, monitor Monitor) error {
-	// We parse the interval first. If the interval is sufficient, we may perform the check.
-	// The interval should be in the format of stringified `time.Duration` (e.g., "1m", "30s").
-	// If the interval is below 1 minute, we execute it immediately as the 1 minute guard
-	// is handled in the main loop.
-	// Otherwise, if the interval is 5 minutes, we may only perform the check at every 5th minute.
-	// This is to reduce the load on both the checker and the upstream server.
-
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Perform Monitor Check"))
 	ctx = span.Context()
 	defer span.Finish()
@@ -236,99 +225,15 @@ func (c *Checker) performMonitorCheck(ctx context.Context, monitor Monitor) erro
 		}
 	}
 
-	requestStart := time.Now()
-	checkerTracer := NewCheckerTracer()
-	ctx = httptrace.WithClientTrace(ctx, checkerTracer.GetClientTrace())
-	request, err := http.NewRequestWithContext(ctx, monitor.Method, monitor.Url, nil)
-	if err != nil {
-		return fmt.Errorf("creating monitor request: %w", err)
+	submission := c.probeMonitor(ctx, monitor)
+	if submission.Timestamp.IsZero() {
+		submission.Timestamp = time.Now().UTC()
 	}
-	if monitor.Headers != nil {
-		for key, value := range monitor.Headers {
-			request.Header.Set(key, value)
-		}
-	}
-	var timeout = time.Second * 30
-	if monitor.TimeoutSeconds.Valid {
-		timeout = time.Duration(monitor.TimeoutSeconds.Int64) * time.Second
+	if !submission.Success && !submission.FailureReason.Valid {
+		submission.FailureReason = null.StringFrom("probe failed")
 	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			TLSClientConfig:       &tls.Config{InsecureSkipVerify: monitor.SkipTLSVerify},
-		},
-		Timeout: timeout,
-	}
-
-	response, err := httpClient.Do(request)
-	latency := time.Since(requestStart).Milliseconds()
-	if err != nil {
-		// Even if the request fails, we want to record the latency and status code as 0.
-		slog.ErrorContext(ctx, "performing monitor request", slog.String("monitor_id", monitor.ID), slog.String("error", err.Error()))
-		go c.sendMonitorSubmission(ctx, CheckerSubmissionRequest{
-			MonitorID:  monitor.ID,
-			LatencyMs:  latency,
-			StatusCode: 0,
-			Timestamp:  time.Now(),
-		})
-		return nil
-	}
-	defer func() {
-		if response.Body != nil {
-			_ = response.Body.Close()
-		}
-	}()
-
-	var responseBody null.String
-	if response.ContentLength > 0 && response.Body != nil {
-		bodyBytes, err := io.ReadAll(response.Body)
-		if err != nil {
-			slog.ErrorContext(ctx, "reading monitor response body", slog.String("monitor_id", monitor.ID), slog.String("error", err.Error()))
-		} else {
-			responseBody = null.NewString(string(bodyBytes), true)
-		}
-	}
-
-	var tlsVersion null.String
-	var tlsCipher null.String
-	var tlsExpiry null.Time
-	if response.TLS != nil {
-		tlsVersion = null.NewString(tls.VersionName(response.TLS.Version), true)
-		tlsCipher = null.NewString(tls.CipherSuiteName(response.TLS.CipherSuite), true)
-
-		if len(response.TLS.PeerCertificates) > 0 {
-			// According to the Go stdlib docs:
-			// The first element is the leaf certificate that the connection is verified against.
-			firstPeerCertificate := response.TLS.PeerCertificates[0]
-			if firstPeerCertificate != nil {
-				tlsExpiry = null.NewTime(firstPeerCertificate.NotAfter, true)
-			}
-		}
-	}
-
-	go c.sendMonitorSubmission(ctx, CheckerSubmissionRequest{
-		MonitorID:       monitor.ID,
-		LatencyMs:       latency,
-		StatusCode:      response.StatusCode,
-		Timestamp:       time.Now(),
-		ResponseHeaders: map[string]string{},
-		ResponseBody:    responseBody,
-		TlsVersion:      tlsVersion,
-		TlsCipher:       tlsCipher,
-		TlsExpiry:       tlsExpiry,
-		Timings:         checkerTracer.GetTimings(),
-	})
-
+	go c.sendMonitorSubmission(ctx, submission)
 	return nil
 }
 

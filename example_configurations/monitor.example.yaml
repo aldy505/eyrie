@@ -11,65 +11,63 @@ monitors:
     name: "Example Monitor 1"
     description: "This is an example monitor checking example.com"
     interval: "1m"
-    method: "GET"
-    skip_tls_verify: false
-    url: "https://example.com"
-    expected_status_codes:
-      - 200
-      - 301
-      - 302
-      - 400
-    headers:
-      User-Agent: "EyrieMonitor/1.0"
-    timeout_seconds: 30
+    type: "http"
+    http:
+      method: "GET"
+      skip_tls_verify: false
+      url: "https://example.com"
+      expected_status_codes:
+        - 200
+        - 301
+        - 302
+        - 400
+      headers:
+        User-Agent: "EyrieMonitor/1.0"
+      timeout_seconds: 30
   - id: "example-monitor-3"
     name: "Example Monitor 3"
     description: "This is an example monitor checking example.net"
     interval: "1m"
-    method: "GET"
-    skip_tls_verify: false
-    url: "https://example.net"
-    expected_status_codes:
-      - 200
-      - 301
-      - 302
-      - 400
-    headers:
-      User-Agent: "EyrieMonitor/1.0"
-    timeout_seconds: 30
+    type: "tcp"
+    tcp:
+      address: "example.net:443"
+      use_tls: true
+      timeout_seconds: 15
   - id: "example-monitor-4"
     name: "Example Monitor 4"
     description: "This is an example monitor checking example.org"
     interval: "1m"
-    method: "GET"
-    skip_tls_verify: false
-    url: "https://example.org"
-    expected_status_codes:
-      - 200
-      - 301
-      - 302
-      - 400
-    headers:
-      User-Agent: "EyrieMonitor/1.0"
-    timeout_seconds: 30
+    type: "icmp"
+    icmp:
+      host: "1.1.1.1"
+      count: 1
+      timeout_seconds: 5
   - id: "example-monitor-2"
     name: "Example Monitor 2"
     interval: "5m"
-    method: "GET"
-    skip_tls_verify: true
-    url: "https://another-example.com/health"
-    expected_status_codes:
-      - 200
+    type: "redis"
+    redis:
+      address: "127.0.0.1:6379"
+      timeout_seconds: 10
   - id: "example-github-1"
     name: "GitHub Status Monitor"
     interval: "2m"
-    method: "GET"
-    skip_tls_verify: false
-    url: "https://github.com/healthz"
-    expected_status_codes:
-      - 200
-    headers:
-      User-Agent: "EyrieMonitor/1.0"
-      X-GitHub-Api-Version: "2022-11-28"
-      Accept: "text/plain"
-    timeout_seconds: 15
+    type: "http"
+    http:
+      method: "GET"
+      skip_tls_verify: false
+      url: "https://github.com/healthz"
+      expected_status_codes:
+        - 200
+      headers:
+        User-Agent: "EyrieMonitor/1.0"
+        X-GitHub-Api-Version: "2022-11-28"
+        Accept: "text/plain"
+      timeout_seconds: 15
+  - id: "example-postgres-1"
+    name: "Primary PostgreSQL"
+    interval: "1m"
+    type: "postgres"
+    postgres:
+      dsn: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+      timeout_seconds: 10

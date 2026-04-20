@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,7 +42,7 @@ type ServerOptions struct {
 	IngesterProducer  *pubsub.Topic
 }
 
-//go:embed frontend/dist
+//go:embed frontend
 var frontendFilesystem embed.FS
 
 func NewServer(options ServerOptions) (*Server, error) {
@@ -56,7 +57,11 @@ func NewServer(options ServerOptions) (*Server, error) {
 	// Create a sub-filesystem rooted at frontend/dist so we can reference index.html directly
 	distFS, err := fs.Sub(frontendFilesystem, "frontend/dist")
 	if err != nil {
-		return nil, fmt.Errorf("creating sub-filesystem: %w", err)
+		if _, statErr := os.Stat("frontend/dist"); statErr == nil {
+			distFS = os.DirFS("frontend/dist")
+		} else {
+			distFS = placeholderFrontendFS{}
+		}
 	}
 
 	sentryMiddleware := sentryhttp.New(sentryhttp.Options{
@@ -74,6 +79,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.Handle("GET /config", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.ConfigHandler)))
 	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataHandler)))
 	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataByRegionHandler)))
+	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.MonitorIncidentsHandler)))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
 	mux.Handle("/", SpaHandler(distFS, "index.html"))
@@ -155,6 +161,23 @@ type UptimeDataByRegionResponse struct {
 	LastUpdated time.Time                   `json:"last_updated"`
 	Metadata    UptimeDataByRegionMetadata  `json:"metadata"`
 	Monitors    []UptimeDataByRegionMonitor `json:"monitors"`
+}
+
+type MonitorIncidentSummary struct {
+	MonitorID        string    `json:"monitor_id"`
+	Name             string    `json:"name"`
+	ProbeType        string    `json:"probe_type"`
+	Status           string    `json:"status"`
+	Scope            string    `json:"scope"`
+	Reason           string    `json:"reason"`
+	AffectedRegions  []string  `json:"affected_regions"`
+	LastTransitionAt time.Time `json:"last_transition_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type MonitorIncidentsResponse struct {
+	LastUpdated time.Time                `json:"last_updated"`
+	Incidents   []MonitorIncidentSummary `json:"incidents"`
 }
 
 func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
@@ -360,7 +383,7 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 				totalLatency += int64(mh.LatencyMs)
 				totalChecks++
 
-				if !slices.Contains(monitorConfig.ExpectedStatusCodes, mh.StatusCode) {
+				if !monitorConfig.IsSuccessfulStatus(mh.StatusCode, mh.Success) {
 					downtimeMinutes += 1 // assuming each check is done every minute
 				}
 			}
@@ -405,6 +428,52 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(response)
 }
 
+func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	if err != nil {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to fetch monitor ids"})
+		return
+	}
+
+	incidents := make([]MonitorIncidentSummary, 0, len(monitorMetadata))
+	for _, metadata := range monitorMetadata {
+		monitorConfig, err := s.findMonitorConfig(metadata.ID)
+		if err != nil {
+			continue
+		}
+		state, err := s.fetchIncidentState(ctx, metadata.ID)
+		if err != nil {
+			continue
+		}
+		incidents = append(incidents, MonitorIncidentSummary{
+			MonitorID:        metadata.ID,
+			Name:             metadata.Name,
+			ProbeType:        string(monitorConfig.EffectiveType()),
+			Status:           state.Status,
+			Scope:            state.Scope,
+			Reason:           state.Reason,
+			AffectedRegions:  ParseRegionsJSON(state.AffectedRegions),
+			LastTransitionAt: state.LastTransitionAt,
+			UpdatedAt:        state.UpdatedAt,
+		})
+	}
+
+	slices.SortStableFunc(incidents, func(a, b MonitorIncidentSummary) int {
+		return strings.Compare(a.MonitorID, b.MonitorID)
+	})
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(MonitorIncidentsResponse{
+		LastUpdated: time.Now().UTC(),
+		Incidents:   incidents,
+	})
+}
+
 func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorMetadata, error) {
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch Valid Monitor IDs"))
 	ctx = span.Context()
@@ -447,6 +516,52 @@ func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorM
 	return monitors, nil
 }
 
+func (s *Server) findMonitorConfig(monitorID string) (Monitor, error) {
+	for _, monitor := range s.monitorConfig.Monitors {
+		if monitor.ID == monitorID {
+			return monitor, nil
+		}
+	}
+	return Monitor{}, ErrMonitorConfigNotFound
+}
+
+func (s *Server) fetchIncidentState(ctx context.Context, monitorID string) (MonitorIncidentState, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return MonitorIncidentState{}, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	var state MonitorIncidentState
+	err = conn.QueryRowContext(ctx, `
+		SELECT monitor_id, status, scope, affected_regions, reason, last_transition_at, updated_at
+		FROM monitor_incident_state
+		WHERE monitor_id = ?
+	`, monitorID).Scan(
+		&state.MonitorID,
+		&state.Status,
+		&state.Scope,
+		&state.AffectedRegions,
+		&state.Reason,
+		&state.LastTransitionAt,
+		&state.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MonitorIncidentState{
+				MonitorID:       monitorID,
+				Status:          MonitorStatusHealthy,
+				Scope:           MonitorScopeHealthy,
+				AffectedRegions: "[]",
+				Reason:          "",
+			}, nil
+		}
+		return MonitorIncidentState{}, fmt.Errorf("querying incident state: %w", err)
+	}
+
+	return state, nil
+}
+
 // ErrMonitorConfigNotFound is returned when a monitor configuration cannot be found for a given monitor ID.
 var ErrMonitorConfigNotFound = errors.New("monitor config not found")
 
@@ -473,6 +588,7 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 	rows, err := conn.QueryContext(ctx, `
 	SELECT
 		region,
+		success,
 		status_code,
 		latency_ms,
 		created_at
@@ -490,7 +606,7 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 	var monitorHistoricals []MonitorHistorical
 	for rows.Next() {
 		var monitorHistorical MonitorHistorical
-		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
+		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.Success, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
 			return UptimeDataHistorical{}, fmt.Errorf("scanning monitor historical: %w", err)
 		}
 		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
@@ -539,7 +655,7 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 			totalLatency += int64(mh.LatencyMs)
 			totalChecks++
 
-			if !slices.Contains(monitorConfig.ExpectedStatusCodes, mh.StatusCode) {
+			if !monitorConfig.IsSuccessfulStatus(mh.StatusCode, mh.Success) {
 				downtimeMinutes += 1 // assuming each check is done every minute
 			}
 		}
@@ -679,6 +795,7 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 	rows, err := conn.QueryContext(ctx, `
 		SELECT
 			region,
+			success,
 			status_code,
 			latency_ms,
 			created_at
@@ -702,7 +819,7 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 	var monitorHistoricals []MonitorHistorical
 	for rows.Next() {
 		var monitorHistorical MonitorHistorical
-		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
+		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.Success, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning monitor historical: %w", err)
 		}
 		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
@@ -768,6 +885,9 @@ func (s *Server) CheckerRegistration(w http.ResponseWriter, r *http.Request) {
 
 type CheckerSubmissionRequest struct {
 	MonitorID       string              `json:"monitor_id"`
+	ProbeType       string              `json:"probe_type,omitempty"`
+	Success         bool                `json:"success"`
+	FailureReason   null.String         `json:"failure_reason,omitempty"`
 	LatencyMs       int64               `json:"latency_ms"`
 	StatusCode      int                 `json:"status_code"`
 	ResponseHeaders map[string]string   `json:"response_headers,omitempty"`
