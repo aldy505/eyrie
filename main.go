@@ -83,6 +83,7 @@ func main() {
 			EnableTracing:    true,
 			TracesSampleRate: serverConfig.Sentry.TracesSampleRate,
 			EnableLogs:       true,
+			AttachStacktrace: true,
 			Debug:            serverConfig.Sentry.Debug,
 			Release:          Version,
 		}); err != nil {
@@ -268,6 +269,7 @@ func main() {
 			EnableTracing:    true,
 			TracesSampleRate: checkerConfig.Sentry.TracesSampleRate,
 			EnableLogs:       true,
+			AttachStacktrace: true,
 			Debug:            checkerConfig.Sentry.Debug,
 			Release:          Version,
 		}); err != nil {

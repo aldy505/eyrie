@@ -1,0 +1,546 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os/exec"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/guregu/null/v5"
+)
+
+type fakeSQLDB struct {
+	pingErr error
+}
+
+func (f fakeSQLDB) PingContext(context.Context) error {
+	return f.pingErr
+}
+
+func (f fakeSQLDB) Close() error {
+	return nil
+}
+
+func TestProbeHTTP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST request, got %s", r.Method)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeHTTP(t.Context(), Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			Method:              http.MethodPost,
+			URL:                 server.URL,
+			ExpectedStatusCodes: []int{http.StatusAccepted},
+		},
+	})
+
+	if !submission.Success {
+		t.Fatalf("expected http probe success, got failure reason %q", submission.FailureReason.String)
+	}
+	if submission.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, submission.StatusCode)
+	}
+	if !strings.Contains(submission.ResponseBody.String, `"ok":true`) {
+		t.Fatalf("expected response body to be captured, got %q", submission.ResponseBody.String)
+	}
+}
+
+func TestProbeHTTPUnexpectedStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeHTTP(t.Context(), Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			Method:              http.MethodGet,
+			URL:                 server.URL,
+			ExpectedStatusCodes: []int{http.StatusOK},
+		},
+	})
+
+	if submission.Success {
+		t.Fatal("expected http probe to fail on unexpected status")
+	}
+	if !submission.FailureReason.Valid || !strings.Contains(submission.FailureReason.String, "unexpected status code 500") {
+		t.Fatalf("expected unexpected status failure reason, got %q", submission.FailureReason.String)
+	}
+}
+
+func TestProbeTCP(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create tcp listener: %v", err)
+	}
+	defer listener.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buffer := make([]byte, 16)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			return
+		}
+		if got := string(buffer[:n]); got != "PING\n" {
+			t.Errorf("expected tcp payload %q, got %q", "PING\n", got)
+		}
+		_, _ = conn.Write([]byte("PONG\n"))
+	}()
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeTCP(t.Context(), Monitor{
+		ID:   "tcp-monitor",
+		Type: MonitorTypeTCP,
+		TCP: MonitorTCPConfig{
+			Address:        listener.Addr().String(),
+			Send:           null.StringFrom("PING\n"),
+			ExpectContains: null.StringFrom("PONG"),
+		},
+	})
+	wg.Wait()
+
+	if !submission.Success {
+		t.Fatalf("expected tcp probe success, got failure reason %q", submission.FailureReason.String)
+	}
+	if !strings.Contains(submission.ResponseBody.String, "PONG") {
+		t.Fatalf("expected tcp response to be captured, got %q", submission.ResponseBody.String)
+	}
+}
+
+func TestProbeRedis(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create redis listener: %v", err)
+	}
+	defer listener.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if strings.HasPrefix(line, "*") {
+				for i := 0; i < 2; i++ {
+					if _, err := reader.ReadString('\n'); err != nil {
+						return
+					}
+				}
+				if _, err := conn.Write([]byte("+PONG\r\n")); err != nil {
+					return
+				}
+				return
+			}
+		}
+	}()
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeRedis(t.Context(), Monitor{
+		ID:   "redis-monitor",
+		Type: MonitorTypeRedis,
+		Redis: MonitorRedisConfig{
+			Address: listener.Addr().String(),
+		},
+	})
+	wg.Wait()
+
+	if !submission.Success {
+		t.Fatalf("expected redis probe success, got failure reason %q", submission.FailureReason.String)
+	}
+}
+
+func TestProbeICMP(t *testing.T) {
+	original := pingCommandContext
+	t.Cleanup(func() {
+		pingCommandContext = original
+	})
+
+	pingCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "printf 'icmp ok'; exit 0")
+	}
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeICMP(t.Context(), Monitor{
+		ID:   "icmp-monitor",
+		Type: MonitorTypeICMP,
+		ICMP: MonitorICMPConfig{
+			Host: "127.0.0.1",
+		},
+	})
+
+	if !submission.Success {
+		t.Fatalf("expected icmp probe success, got failure reason %q", submission.FailureReason.String)
+	}
+	if submission.ResponseBody.String != "icmp ok" {
+		t.Fatalf("expected icmp output to be preserved, got %q", submission.ResponseBody.String)
+	}
+}
+
+func TestProbeICMPFailure(t *testing.T) {
+	original := pingCommandContext
+	t.Cleanup(func() {
+		pingCommandContext = original
+	})
+
+	pingCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "printf 'icmp failed'; exit 1")
+	}
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeICMP(t.Context(), Monitor{
+		ID:   "icmp-monitor",
+		Type: MonitorTypeICMP,
+		ICMP: MonitorICMPConfig{
+			Host: "127.0.0.1",
+		},
+	})
+
+	if submission.Success {
+		t.Fatal("expected icmp probe failure")
+	}
+	if submission.FailureReason.String != "icmp failed" {
+		t.Fatalf("expected icmp failure output, got %q", submission.FailureReason.String)
+	}
+}
+
+func TestProbeDatabaseDrivers(t *testing.T) {
+	original := openSQLDatabase
+	t.Cleanup(func() {
+		openSQLDatabase = original
+	})
+
+	type call struct {
+		driver string
+		dsn    string
+	}
+	var calls []call
+	openSQLDatabase = func(driverName string, dsn string) (sqlPinger, error) {
+		calls = append(calls, call{driver: driverName, dsn: dsn})
+		return fakeSQLDB{}, nil
+	}
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		monitor        Monitor
+		expectedDriver string
+		expectedDSN    string
+	}{
+		{
+			name: "postgres",
+			monitor: Monitor{
+				ID:   "postgres-monitor",
+				Type: MonitorTypePostgres,
+				Postgres: MonitorPostgresConfig{
+					DSN: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
+				},
+			},
+			expectedDriver: "pgx",
+			expectedDSN:    "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
+		},
+		{
+			name: "mysql",
+			monitor: Monitor{
+				ID:   "mysql-monitor",
+				Type: MonitorTypeMySQL,
+				MySQL: MonitorMySQLConfig{
+					DSN: "root:password@tcp(127.0.0.1:3306)/eyrie",
+				},
+			},
+			expectedDriver: "mysql",
+			expectedDSN:    "root:password@tcp(127.0.0.1:3306)/eyrie",
+		},
+		{
+			name: "mssql",
+			monitor: Monitor{
+				ID:   "mssql-monitor",
+				Type: MonitorTypeMSSQL,
+				MSSQL: MonitorMSSQLConfig{
+					DSN: "sqlserver://sa:Password123!@127.0.0.1:1433?database=master",
+				},
+			},
+			expectedDriver: "sqlserver",
+			expectedDSN:    "sqlserver://sa:Password123!@127.0.0.1:1433?database=master",
+		},
+		{
+			name: "clickhouse tcp",
+			monitor: Monitor{
+				ID:   "clickhouse-tcp-monitor",
+				Type: MonitorTypeClickHouse,
+				ClickHouse: MonitorClickHouseConfig{
+					DSN: "clickhouse://default:@127.0.0.1:9000/default",
+				},
+			},
+			expectedDriver: "clickhouse",
+			expectedDSN:    "clickhouse://default:@127.0.0.1:9000/default",
+		},
+		{
+			name: "clickhouse http",
+			monitor: Monitor{
+				ID:   "clickhouse-http-monitor",
+				Type: MonitorTypeClickHouse,
+				ClickHouse: MonitorClickHouseConfig{
+					DSN: "clickhouse://default:@127.0.0.1:8123/default?protocol=http",
+				},
+			},
+			expectedDriver: "clickhouse",
+			expectedDSN:    "clickhouse://default:@127.0.0.1:8123/default?protocol=http",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			submission := checker.probeMonitor(t.Context(), tt.monitor)
+			if !submission.Success {
+				t.Fatalf("expected probe success, got failure reason %q", submission.FailureReason.String)
+			}
+			if submission.ProbeType != string(tt.monitor.EffectiveType()) {
+				t.Fatalf("expected probe type %q, got %q", tt.monitor.EffectiveType(), submission.ProbeType)
+			}
+		})
+	}
+
+	if len(calls) != len(tests) {
+		t.Fatalf("expected %d database opens, got %d", len(tests), len(calls))
+	}
+	for idx, tt := range tests {
+		if calls[idx].driver != tt.expectedDriver {
+			t.Fatalf("call %d driver = %q, want %q", idx, calls[idx].driver, tt.expectedDriver)
+		}
+		if calls[idx].dsn != tt.expectedDSN {
+			t.Fatalf("call %d dsn = %q, want %q", idx, calls[idx].dsn, tt.expectedDSN)
+		}
+	}
+}
+
+func TestProbeDatabaseFailure(t *testing.T) {
+	original := openSQLDatabase
+	t.Cleanup(func() {
+		openSQLDatabase = original
+	})
+
+	openSQLDatabase = func(driverName string, dsn string) (sqlPinger, error) {
+		return fakeSQLDB{pingErr: errors.New("dial failed")}, nil
+	}
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeMySQL(t.Context(), Monitor{
+		ID:   "mysql-monitor",
+		Type: MonitorTypeMySQL,
+		MySQL: MonitorMySQLConfig{
+			DSN: "root:password@tcp(127.0.0.1:3306)/eyrie",
+		},
+	})
+
+	if submission.Success {
+		t.Fatal("expected mysql probe failure")
+	}
+	if submission.FailureReason.String != "dial failed" {
+		t.Fatalf("expected mysql failure reason to be preserved, got %q", submission.FailureReason.String)
+	}
+}
+
+func TestMonitorDatabaseConfigSupport(t *testing.T) {
+	tests := []struct {
+		name            string
+		monitor         Monitor
+		expectedType    MonitorType
+		expectedTimeout time.Duration
+	}{
+		{
+			name: "mysql autodetect",
+			monitor: Monitor{
+				ID: "mysql-monitor",
+				MySQL: MonitorMySQLConfig{
+					DSN:            "root:password@tcp(127.0.0.1:3306)/eyrie",
+					TimeoutSeconds: null.IntFrom(8),
+				},
+			},
+			expectedType:    MonitorTypeMySQL,
+			expectedTimeout: 8 * time.Second,
+		},
+		{
+			name: "mssql autodetect",
+			monitor: Monitor{
+				ID: "mssql-monitor",
+				MSSQL: MonitorMSSQLConfig{
+					DSN:            "sqlserver://sa:Password123!@127.0.0.1:1433?database=master",
+					TimeoutSeconds: null.IntFrom(9),
+				},
+			},
+			expectedType:    MonitorTypeMSSQL,
+			expectedTimeout: 9 * time.Second,
+		},
+		{
+			name: "clickhouse autodetect",
+			monitor: Monitor{
+				ID: "clickhouse-monitor",
+				ClickHouse: MonitorClickHouseConfig{
+					DSN:            "clickhouse://default:@127.0.0.1:8123/default?protocol=http",
+					TimeoutSeconds: null.IntFrom(11),
+				},
+			},
+			expectedType:    MonitorTypeClickHouse,
+			expectedTimeout: 11 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.monitor.EffectiveType(); got != tt.expectedType {
+				t.Fatalf("EffectiveType() = %q, want %q", got, tt.expectedType)
+			}
+			if got := tt.monitor.EffectiveTimeout(30 * time.Second); got != tt.expectedTimeout {
+				t.Fatalf("EffectiveTimeout() = %s, want %s", got, tt.expectedTimeout)
+			}
+			if err := tt.monitor.Validate(); err != nil {
+				t.Fatalf("Validate() returned error: %v", err)
+			}
+		})
+	}
+}
+
+func TestMonitorValidateDatabaseErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		monitor   Monitor
+		wantError string
+	}{
+		{
+			name: "mysql missing dsn",
+			monitor: Monitor{
+				ID:   "mysql-monitor",
+				Type: MonitorTypeMySQL,
+			},
+			wantError: "mysql.dsn is required",
+		},
+		{
+			name: "mssql missing dsn",
+			monitor: Monitor{
+				ID:   "mssql-monitor",
+				Type: MonitorTypeMSSQL,
+			},
+			wantError: "mssql.dsn is required",
+		},
+		{
+			name: "clickhouse missing dsn",
+			monitor: Monitor{
+				ID:   "clickhouse-monitor",
+				Type: MonitorTypeClickHouse,
+			},
+			wantError: "clickhouse.dsn is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.monitor.Validate()
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("expected error containing %q, got %q", tt.wantError, err.Error())
+			}
+		})
+	}
+}
+
+func TestProbeDatabaseOpenFailure(t *testing.T) {
+	original := openSQLDatabase
+	t.Cleanup(func() {
+		openSQLDatabase = original
+	})
+
+	openSQLDatabase = func(driverName string, dsn string) (sqlPinger, error) {
+		return nil, fmt.Errorf("invalid dsn")
+	}
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeClickHouse(t.Context(), Monitor{
+		ID:   "clickhouse-monitor",
+		Type: MonitorTypeClickHouse,
+		ClickHouse: MonitorClickHouseConfig{
+			DSN: "clickhouse://invalid",
+		},
+	})
+
+	if submission.Success {
+		t.Fatal("expected clickhouse probe failure")
+	}
+	if submission.FailureReason.String != "invalid dsn" {
+		t.Fatalf("expected open failure to be preserved, got %q", submission.FailureReason.String)
+	}
+}

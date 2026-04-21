@@ -20,12 +20,14 @@
 - **HTTP API** (see `server.go`):
   - `GET /config` → serve monitor configuration to checkers.
   - `GET /uptime-data` → aggregated uptime data for the SPA.
+  - `GET /uptime-data-by-region` → region-specific latency and downtime breakdown.
+  - `GET /monitor-incidents` → current monitor health plus active incident metadata.
   - `POST /checker/register` → checker registration + config fetch.
   - `POST /checker/submit` → checker submissions.
   - `/` → SPA handler for frontend.
 - **Workers** (spawned in server mode):
   - **IngesterWorker**: ingests raw `monitor_historical` and performs daily aggregation.
-  - **ProcessorWorker**: analyzes recent submissions, decides if an alert should fire.
+  - **ProcessorWorker**: analyzes recent submissions, updates incident state/records, and decides if an alert should fire.
   - **AlerterWorker**: receives alert messages (currently logs; TODO for real delivery).
 
 ### Checker Behavior
@@ -53,8 +55,24 @@
 
 ### Monitor Config (`MonitorConfig` in `config_monitor.go`)
 - YAML file containing:
-  - `monitors` (id, name, interval, method, URL, headers, expected statuses, etc.)
+  - `monitors` with support for:
+    - `http`
+    - `tcp`
+    - `icmp`
+    - `redis`
+    - `postgres`
+    - `mysql`
+    - `mssql`
+    - `clickhouse`
   - `groups` (group monitors for status page aggregation)
+
+### Database Monitor Notes
+- PostgreSQL uses `postgres.dsn`
+- MySQL uses `mysql.dsn`
+- SQL Server uses `mssql.dsn`
+- ClickHouse uses `clickhouse.dsn`
+  - native TCP example: `clickhouse://default:@127.0.0.1:9000/default`
+  - HTTP example: `clickhouse://default:@127.0.0.1:8123/default?protocol=http`
 
 ### Example Configs
 See `example_configurations/` for:
@@ -66,6 +84,10 @@ See `example_configurations/` for:
 - Uses **DuckDB** via `duckdb-go`.
 - Migration logic lives in `database_migration.go` and `migrations/`.
 - Server mode runs migrations on startup.
+- Incident storage currently spans:
+  - `monitor_incident_state` for current derived health
+  - `monitor_incidents` for active/resolved incident records
+  - `monitor_incident_events` for timeline/history entries
 
 ## Messaging / Task Queue
 Uses `gocloud.dev/pubsub` with pluggable backends:
@@ -110,9 +132,11 @@ npm run dev
 
 ## Observability & Logging
 - Uses **slog** for structured logging.
-- **Sentry** is wired into server and checker for error and trace reporting.
+- **Sentry** is wired into server, checker, and workers for error reporting, traces, logs, and custom metrics.
+- Metric coverage currently includes checker cycles, monitor checks, submission receipt/send/ingestion, incident transitions, and alert delivery outcomes.
 
 ## Notes for Agents
 - Server mode starts workers and runs migrations—be mindful of side effects when testing locally.
 - The SPA is embedded; missing `frontend/dist` will break builds/tests that compile `server.go`.
 - Task queues are configured via addresses; `mem://` is used in example configs for local dev.
+- Programmatic incidents are the current source of truth. The schema now preserves machine-derived fields separately from user-facing fields so manual adjustment can be layered in later without losing the original automatic context.

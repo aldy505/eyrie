@@ -31,7 +31,7 @@ func NewWebhookAlerter(webhookURL, hmacSecret string, customHeaders map[string]s
 }
 
 func (w *WebhookAlerter) Send(ctx context.Context, alert AlertMessage) error {
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Webhook Alerter Send"))
+	span := sentry.StartSpan(ctx, "http.client", sentry.WithDescription("Webhook Alerter Send"), sentry.WithSpanOrigin(sentry.SpanOriginManual))
 	ctx = span.Context()
 	defer span.Finish()
 

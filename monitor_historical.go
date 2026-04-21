@@ -46,3 +46,39 @@ type MonitorIncidentState struct {
 	LastTransitionAt time.Time `db:"last_transition_at"`
 	UpdatedAt        time.Time `db:"updated_at"`
 }
+
+type MonitorIncident struct {
+	ID              string    `db:"id"`
+	MonitorID       string    `db:"monitor_id"`
+	Source          string    `db:"source"`
+	LifecycleState  string    `db:"lifecycle_state"`
+	AutoImpact      string    `db:"auto_impact"`
+	Impact          string    `db:"impact"`
+	AutoTitle       string    `db:"auto_title"`
+	AutoBody        string    `db:"auto_body"`
+	Title           string    `db:"title"`
+	Body            string    `db:"body"`
+	Status          string    `db:"status"`
+	Scope           string    `db:"scope"`
+	AffectedRegions string    `db:"affected_regions"`
+	StartedAt       time.Time `db:"started_at"`
+	ResolvedAt      null.Time `db:"resolved_at"`
+	CreatedAt       time.Time `db:"created_at"`
+	UpdatedAt       time.Time `db:"updated_at"`
+}
+
+type MonitorIncidentEvent struct {
+	ID              string    `db:"id"`
+	IncidentID      string    `db:"incident_id"`
+	MonitorID       string    `db:"monitor_id"`
+	EventType       string    `db:"event_type"`
+	Source          string    `db:"source"`
+	LifecycleState  string    `db:"lifecycle_state"`
+	Impact          string    `db:"impact"`
+	Title           string    `db:"title"`
+	Body            string    `db:"body"`
+	Status          string    `db:"status"`
+	Scope           string    `db:"scope"`
+	AffectedRegions string    `db:"affected_regions"`
+	CreatedAt       time.Time `db:"created_at"`
+}

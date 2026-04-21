@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/getsentry/sentry-go/attribute"
 	"github.com/guregu/null/v5"
 	"golang.org/x/sync/semaphore"
 )
@@ -93,8 +94,12 @@ REGISTER_UPSTREAM:
 					continue
 				}
 
-				span := sentry.StartSpan(checkerCtx, "function", sentry.WithDescription("Perform Monitor Checks"))
+				checkCycleStart := time.Now()
+				span := sentry.StartTransaction(checkerCtx, "checker.perform_checks", sentry.WithOpName("task.checker.cycle"), sentry.WithTransactionSource(sentry.SourceCustom))
 				ctx = span.Context()
+				span.SetData("eyrie.monitor_count", len(c.monitors.Monitors))
+				span.SetData("eyrie.region", c.config.Region)
+				sentry.NewMeter(context.Background()).WithCtx(ctx).Gauge("eyrie.checker.monitors.configured", float64(len(c.monitors.Monitors)), sentry.WithAttributes(attribute.String("region", c.config.Region)))
 				slog.InfoContext(ctx, "performing checks for monitors", slog.Int("monitor_count", len(c.monitors.Monitors)))
 				s := semaphore.NewWeighted(10) // Limit to 10 concurrent checks
 				wg := sync.WaitGroup{}
@@ -117,6 +122,7 @@ REGISTER_UPSTREAM:
 				}
 
 				wg.Wait()
+				sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.checker.cycle.duration", float64(time.Since(checkCycleStart).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("region", c.config.Region)))
 				span.Finish()
 				checkerCancel()
 			}
@@ -157,7 +163,7 @@ func (c *Checker) Stop() error {
 var ErrCheckerRegistrationFailed = fmt.Errorf("checker registration failed")
 
 func (c *Checker) registerToUpstream(ctx context.Context) error {
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Register Checker to upstream"))
+	span := sentry.StartSpan(ctx, "http.client", sentry.WithDescription("Register Checker to upstream"), sentry.WithSpanOrigin(sentry.SpanOriginManual))
 	ctx = span.Context()
 	defer span.Finish()
 
@@ -205,9 +211,13 @@ func (c *Checker) registerToUpstream(ctx context.Context) error {
 }
 
 func (c *Checker) performMonitorCheck(ctx context.Context, monitor Monitor) error {
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Perform Monitor Check"))
+	checkStartedAt := time.Now()
+	span := sentry.StartSpan(ctx, "monitor.check", sentry.WithDescription("Perform Monitor Check"), sentry.WithSpanOrigin(sentry.SpanOriginManual))
 	ctx = span.Context()
 	defer span.Finish()
+	span.SetData("eyrie.monitor_id", monitor.ID)
+	span.SetData("eyrie.probe_type", monitor.EffectiveType())
+	span.SetData("eyrie.region", c.config.Region)
 
 	parsedInterval, err := time.ParseDuration(monitor.Interval)
 	if err != nil {
@@ -233,14 +243,25 @@ func (c *Checker) performMonitorCheck(ctx context.Context, monitor Monitor) erro
 		submission.FailureReason = null.StringFrom("probe failed")
 	}
 
+	result := "success"
+	if !submission.Success {
+		result = "failure"
+	}
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.checks", 1, sentry.WithAttributes(attribute.String("probe_type", submission.ProbeType), attribute.String("region", c.config.Region), attribute.String("result", result)))
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.check.duration", float64(time.Since(checkStartedAt).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", submission.ProbeType), attribute.String("region", c.config.Region), attribute.String("result", result)))
+	if submission.LatencyMs > 0 {
+		sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.latency", float64(submission.LatencyMs), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", submission.ProbeType), attribute.String("region", c.config.Region), attribute.String("result", result)))
+	}
+
 	go c.sendMonitorSubmission(ctx, submission)
 	return nil
 }
 
 func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerSubmissionRequest) {
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Send Monitor Submission"))
+	span := sentry.StartSpan(ctx, "http.client", sentry.WithDescription("Send Monitor Submission"), sentry.WithSpanOrigin(sentry.SpanOriginManual))
 	ctx = span.Context()
 	defer span.Finish()
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.attempted", 1, sentry.WithAttributes(attribute.String("probe_type", submission.ProbeType), attribute.String("region", c.config.Region)))
 
 	// We don't want the submission to be cancelled if the parent context is cancelled.
 	ctx = context.WithoutCancel(ctx)
@@ -294,10 +315,12 @@ func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerS
 		}
 
 		// Success
+		sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.sent", 1, sentry.WithAttributes(attribute.String("probe_type", submission.ProbeType), attribute.String("region", c.config.Region)))
 		return
 	}
 
 	if parentErr != nil {
+		sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.failed", 1, sentry.WithAttributes(attribute.String("probe_type", submission.ProbeType), attribute.String("region", c.config.Region)))
 		slog.ErrorContext(ctx, "failed to send monitor submission after retries", slog.String("error", parentErr.Error()))
 	}
 }

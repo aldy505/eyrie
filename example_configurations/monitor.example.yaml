@@ -71,3 +71,31 @@ monitors:
     postgres:
       dsn: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       timeout_seconds: 10
+  - id: "example-mysql-1"
+    name: "Primary MySQL"
+    interval: "1m"
+    type: "mysql"
+    mysql:
+      dsn: "root:password@tcp(127.0.0.1:3306)/eyrie"
+      timeout_seconds: 10
+  - id: "example-mssql-1"
+    name: "Primary SQL Server"
+    interval: "1m"
+    type: "mssql"
+    mssql:
+      dsn: "sqlserver://sa:Password123!@127.0.0.1:1433?database=master"
+      timeout_seconds: 10
+  - id: "example-clickhouse-tcp-1"
+    name: "Primary ClickHouse (TCP)"
+    interval: "1m"
+    type: "clickhouse"
+    clickhouse:
+      dsn: "clickhouse://default:@127.0.0.1:9000/default"
+      timeout_seconds: 10
+  - id: "example-clickhouse-http-1"
+    name: "Primary ClickHouse (HTTP)"
+    interval: "1m"
+    type: "clickhouse"
+    clickhouse:
+      dsn: "clickhouse://default:@127.0.0.1:8123/default?protocol=http"
+      timeout_seconds: 10

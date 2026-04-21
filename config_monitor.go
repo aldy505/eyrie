@@ -11,11 +11,14 @@ import (
 type MonitorType string
 
 const (
-	MonitorTypeHTTP     MonitorType = "http"
-	MonitorTypeTCP      MonitorType = "tcp"
-	MonitorTypeICMP     MonitorType = "icmp"
-	MonitorTypeRedis    MonitorType = "redis"
-	MonitorTypePostgres MonitorType = "postgres"
+	MonitorTypeHTTP       MonitorType = "http"
+	MonitorTypeTCP        MonitorType = "tcp"
+	MonitorTypeICMP       MonitorType = "icmp"
+	MonitorTypeRedis      MonitorType = "redis"
+	MonitorTypePostgres   MonitorType = "postgres"
+	MonitorTypeMySQL      MonitorType = "mysql"
+	MonitorTypeMSSQL      MonitorType = "mssql"
+	MonitorTypeClickHouse MonitorType = "clickhouse"
 )
 
 type MonitorHTTPConfig struct {
@@ -57,6 +60,21 @@ type MonitorPostgresConfig struct {
 	TimeoutSeconds null.Int `yaml:"timeout_seconds" json:"timeout_seconds"`
 }
 
+type MonitorMySQLConfig struct {
+	DSN            string   `yaml:"dsn" json:"dsn"`
+	TimeoutSeconds null.Int `yaml:"timeout_seconds" json:"timeout_seconds"`
+}
+
+type MonitorMSSQLConfig struct {
+	DSN            string   `yaml:"dsn" json:"dsn"`
+	TimeoutSeconds null.Int `yaml:"timeout_seconds" json:"timeout_seconds"`
+}
+
+type MonitorClickHouseConfig struct {
+	DSN            string   `yaml:"dsn" json:"dsn"`
+	TimeoutSeconds null.Int `yaml:"timeout_seconds" json:"timeout_seconds"`
+}
+
 type Monitor struct {
 	ID          string      `yaml:"id" json:"id"`
 	Name        string      `yaml:"name" json:"name"`
@@ -73,11 +91,14 @@ type Monitor struct {
 	TimeoutSeconds      null.Int          `yaml:"timeout_seconds" json:"timeout_seconds"`
 	JqAssertion         null.String       `yaml:"jq_assertion" json:"-"`
 
-	HTTP     *MonitorHTTPConfig    `yaml:"http" json:"http,omitempty"`
-	TCP      MonitorTCPConfig      `yaml:"tcp" json:"tcp"`
-	ICMP     MonitorICMPConfig     `yaml:"icmp" json:"icmp"`
-	Redis    MonitorRedisConfig    `yaml:"redis" json:"redis"`
-	Postgres MonitorPostgresConfig `yaml:"postgres" json:"postgres"`
+	HTTP       *MonitorHTTPConfig      `yaml:"http" json:"http,omitempty"`
+	TCP        MonitorTCPConfig        `yaml:"tcp" json:"tcp"`
+	ICMP       MonitorICMPConfig       `yaml:"icmp" json:"icmp"`
+	Redis      MonitorRedisConfig      `yaml:"redis" json:"redis"`
+	Postgres   MonitorPostgresConfig   `yaml:"postgres" json:"postgres"`
+	MySQL      MonitorMySQLConfig      `yaml:"mysql" json:"mysql"`
+	MSSQL      MonitorMSSQLConfig      `yaml:"mssql" json:"mssql"`
+	ClickHouse MonitorClickHouseConfig `yaml:"clickhouse" json:"clickhouse"`
 }
 
 type Group struct {
@@ -98,6 +119,15 @@ func (m Monitor) EffectiveType() MonitorType {
 	}
 	if m.Postgres.DSN != "" {
 		return MonitorTypePostgres
+	}
+	if m.MySQL.DSN != "" {
+		return MonitorTypeMySQL
+	}
+	if m.MSSQL.DSN != "" {
+		return MonitorTypeMSSQL
+	}
+	if m.ClickHouse.DSN != "" {
+		return MonitorTypeClickHouse
 	}
 	if m.Redis.Address != "" {
 		return MonitorTypeRedis
@@ -173,6 +203,18 @@ func (m Monitor) EffectiveTimeout(defaultSeconds time.Duration) time.Duration {
 		if m.Postgres.TimeoutSeconds.Valid {
 			return time.Duration(m.Postgres.TimeoutSeconds.Int64) * time.Second
 		}
+	case MonitorTypeMySQL:
+		if m.MySQL.TimeoutSeconds.Valid {
+			return time.Duration(m.MySQL.TimeoutSeconds.Int64) * time.Second
+		}
+	case MonitorTypeMSSQL:
+		if m.MSSQL.TimeoutSeconds.Valid {
+			return time.Duration(m.MSSQL.TimeoutSeconds.Int64) * time.Second
+		}
+	case MonitorTypeClickHouse:
+		if m.ClickHouse.TimeoutSeconds.Valid {
+			return time.Duration(m.ClickHouse.TimeoutSeconds.Int64) * time.Second
+		}
 	}
 	return defaultSeconds
 }
@@ -207,6 +249,18 @@ func (m Monitor) Validate() error {
 	case MonitorTypePostgres:
 		if m.Postgres.DSN == "" {
 			return fmt.Errorf("monitor %s: postgres.dsn is required", m.ID)
+		}
+	case MonitorTypeMySQL:
+		if m.MySQL.DSN == "" {
+			return fmt.Errorf("monitor %s: mysql.dsn is required", m.ID)
+		}
+	case MonitorTypeMSSQL:
+		if m.MSSQL.DSN == "" {
+			return fmt.Errorf("monitor %s: mssql.dsn is required", m.ID)
+		}
+	case MonitorTypeClickHouse:
+		if m.ClickHouse.DSN == "" {
+			return fmt.Errorf("monitor %s: clickhouse.dsn is required", m.ID)
 		}
 	default:
 		return fmt.Errorf("monitor %s: unsupported type %q", m.ID, m.EffectiveType())

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+	"github.com/getsentry/sentry-go/attribute"
 	"gocloud.dev/pubsub"
 )
 
@@ -40,12 +42,12 @@ func (w *AlerterWorker) Start() error {
 		case <-w.shutdown:
 			return nil
 		default:
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
 			message, err := w.subscriber.Receive(ctx)
-			cancel()
 			if err != nil {
 				slog.Error("receiving message for alert queue", slog.String("error", err.Error()))
 				time.Sleep(10 * time.Millisecond)
+				cancel()
 				continue
 			}
 
@@ -65,11 +67,15 @@ func (w *AlerterWorker) Start() error {
 					slog.String("monitor_id", alert.MonitorID),
 					slog.String("status", alert.Status),
 					slog.String("scope", alert.Scope))
+				sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.alert.deliveries.skipped", 1, sentry.WithAttributes(attribute.String("status", alert.Status), attribute.String("scope", alert.Scope)))
 				message.Ack()
+				cancel()
 				continue
 			}
 
 			sendCtx, sendCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			span := sentry.StartTransaction(sendCtx, "alerter.send_alert", sentry.WithOpName("task.alerter.process"), sentry.WithTransactionSource(sentry.SourceCustom))
+			sendCtx = span.Context()
 			var sendErr error
 			deliveredCount := 0
 			for _, alerter := range w.alerters {
@@ -79,9 +85,9 @@ func (w *AlerterWorker) Start() error {
 				}
 				deliveredCount++
 			}
-			sendCancel()
 
 			if sendErr != nil {
+				sentry.NewMeter(context.Background()).WithCtx(sendCtx).Count("eyrie.alert.deliveries.failed", 1, sentry.WithAttributes(attribute.String("status", alert.Status), attribute.String("scope", alert.Scope)))
 				slog.Error("sending alert",
 					slog.String("error", sendErr.Error()),
 					slog.Int("delivered_count", deliveredCount),
@@ -91,10 +97,17 @@ func (w *AlerterWorker) Start() error {
 				} else {
 					message.Ack()
 				}
+				sendCancel()
+				span.Finish()
+				cancel()
 				continue
 			}
 
+			sentry.NewMeter(context.Background()).WithCtx(sendCtx).Count("eyrie.alert.deliveries.sent", 1, sentry.WithAttributes(attribute.String("status", alert.Status), attribute.String("scope", alert.Scope)))
 			message.Ack()
+			sendCancel()
+			span.Finish()
+			cancel()
 		}
 	}
 }

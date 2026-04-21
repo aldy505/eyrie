@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/getsentry/sentry-go/attribute"
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/guregu/null/v5"
 	"github.com/rs/cors"
@@ -159,15 +160,20 @@ type UptimeDataByRegionResponse struct {
 }
 
 type MonitorIncidentSummary struct {
-	MonitorID        string    `json:"monitor_id"`
-	Name             string    `json:"name"`
-	ProbeType        string    `json:"probe_type"`
-	Status           string    `json:"status"`
-	Scope            string    `json:"scope"`
-	Reason           string    `json:"reason"`
-	AffectedRegions  []string  `json:"affected_regions"`
-	LastTransitionAt time.Time `json:"last_transition_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	MonitorID              string    `json:"monitor_id"`
+	Name                   string    `json:"name"`
+	ProbeType              string    `json:"probe_type"`
+	Status                 string    `json:"status"`
+	Scope                  string    `json:"scope"`
+	Reason                 string    `json:"reason"`
+	AffectedRegions        []string  `json:"affected_regions"`
+	LastTransitionAt       time.Time `json:"last_transition_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+	IncidentID             string    `json:"incident_id,omitempty"`
+	IncidentSource         string    `json:"incident_source,omitempty"`
+	IncidentLifecycleState string    `json:"incident_lifecycle_state,omitempty"`
+	IncidentImpact         string    `json:"incident_impact,omitempty"`
+	IncidentTitle          string    `json:"incident_title,omitempty"`
 }
 
 type MonitorIncidentsResponse struct {
@@ -452,7 +458,16 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
 			return
 		}
-		incidents = append(incidents, MonitorIncidentSummary{
+		activeIncident, activeFound, err := s.fetchActiveIncident(ctx, metadata.ID)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to load active incident for monitor", "monitor_id", metadata.ID, "error", err)
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
+			return
+		}
+
+		summary := MonitorIncidentSummary{
 			MonitorID:        metadata.ID,
 			Name:             metadata.Name,
 			ProbeType:        string(monitorConfig.EffectiveType()),
@@ -462,7 +477,18 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 			AffectedRegions:  ParseRegionsJSON(state.AffectedRegions),
 			LastTransitionAt: state.LastTransitionAt,
 			UpdatedAt:        state.UpdatedAt,
-		})
+		}
+		if activeFound {
+			summary.IncidentID = activeIncident.ID
+			summary.IncidentSource = activeIncident.Source
+			summary.IncidentLifecycleState = activeIncident.LifecycleState
+			summary.IncidentImpact = activeIncident.Impact
+			summary.IncidentTitle = activeIncident.Title
+			if activeIncident.Body != "" {
+				summary.Reason = activeIncident.Body
+			}
+		}
+		incidents = append(incidents, summary)
 	}
 
 	slices.SortStableFunc(incidents, func(a, b MonitorIncidentSummary) int {
@@ -563,6 +589,49 @@ func (s *Server) fetchIncidentState(ctx context.Context, monitorID string) (Moni
 	}
 
 	return state, nil
+}
+
+func (s *Server) fetchActiveIncident(ctx context.Context, monitorID string) (MonitorIncident, bool, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return MonitorIncident{}, false, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	var incident MonitorIncident
+	err = conn.QueryRowContext(ctx, `
+		SELECT id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, started_at, resolved_at, created_at, updated_at
+		FROM monitor_incidents
+		WHERE monitor_id = ? AND resolved_at IS NULL
+		ORDER BY started_at DESC
+		LIMIT 1
+	`, monitorID).Scan(
+		&incident.ID,
+		&incident.MonitorID,
+		&incident.Source,
+		&incident.LifecycleState,
+		&incident.AutoImpact,
+		&incident.Impact,
+		&incident.AutoTitle,
+		&incident.AutoBody,
+		&incident.Title,
+		&incident.Body,
+		&incident.Status,
+		&incident.Scope,
+		&incident.AffectedRegions,
+		&incident.StartedAt,
+		&incident.ResolvedAt,
+		&incident.CreatedAt,
+		&incident.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MonitorIncident{}, false, nil
+		}
+		return MonitorIncident{}, false, fmt.Errorf("querying active incident: %w", err)
+	}
+
+	return incident, true, nil
 }
 
 // ErrMonitorConfigNotFound is returned when a monitor configuration cannot be found for a given monitor ID.
@@ -939,6 +1008,14 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.InfoContext(ctx, "received check results", slog.String("monitor_id", request.MonitorID), slog.String("region", region))
+	probeType := request.ProbeType
+	if probeType == "" {
+		probeType = string(MonitorTypeHTTP)
+	}
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.received", 1, sentry.WithAttributes(attribute.String("probe_type", probeType), attribute.String("region", region)))
+	if request.LatencyMs > 0 {
+		sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.submissions.received_latency", float64(request.LatencyMs), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", probeType), attribute.String("region", region)))
+	}
 
 	// Enqueue the submission to the task queue
 	body, err := json.Marshal(request)

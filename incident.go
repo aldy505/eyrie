@@ -14,6 +14,25 @@ const (
 	MonitorScopeHealthy = "healthy"
 	MonitorScopeLocal   = "local"
 	MonitorScopeGlobal  = "global"
+
+	IncidentSourceProgrammatic = "programmatic"
+	IncidentSourceManual       = "manual"
+
+	IncidentLifecycleInvestigating = "investigating"
+	IncidentLifecycleIdentified    = "identified"
+	IncidentLifecycleMonitoring    = "monitoring"
+	IncidentLifecycleResolved      = "resolved"
+
+	IncidentImpactUnknown             = "unknown"
+	IncidentImpactOperational         = "operational"
+	IncidentImpactMaintenance         = "maintenance"
+	IncidentImpactDegradedPerformance = "degraded_performance"
+	IncidentImpactPartialOutage       = "partial_outage"
+	IncidentImpactMajorOutage         = "major_outage"
+
+	IncidentEventTypeCreated  = "created"
+	IncidentEventTypeUpdated  = "updated"
+	IncidentEventTypeResolved = "resolved"
 )
 
 type IncidentEvaluation struct {
@@ -58,4 +77,36 @@ func ParseRegionsJSON(raw string) []string {
 	}
 	slices.Sort(regions)
 	return regions
+}
+
+func (e IncidentEvaluation) HasActiveIncident() bool {
+	return e.Status != MonitorStatusHealthy
+}
+
+func (e IncidentEvaluation) Impact() string {
+	switch {
+	case e.Status == MonitorStatusHealthy:
+		return IncidentImpactOperational
+	case e.Status == MonitorStatusDown && e.Scope == MonitorScopeGlobal:
+		return IncidentImpactMajorOutage
+	case e.Status == MonitorStatusDown:
+		return IncidentImpactPartialOutage
+	case e.Status == MonitorStatusDegraded:
+		return IncidentImpactDegradedPerformance
+	default:
+		return IncidentImpactUnknown
+	}
+}
+
+func (e IncidentEvaluation) ProgrammaticTitle(monitor Monitor) string {
+	switch {
+	case e.Status == MonitorStatusDown && e.Scope == MonitorScopeGlobal:
+		return monitor.Name + " is experiencing a global outage"
+	case e.Status == MonitorStatusDown:
+		return monitor.Name + " is partially unavailable"
+	case e.Status == MonitorStatusDegraded:
+		return monitor.Name + " is experiencing regional degradation"
+	default:
+		return monitor.Name + " is healthy"
+	}
 }

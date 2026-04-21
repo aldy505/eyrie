@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -11,6 +12,9 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/getsentry/sentry-go/attribute"
+	"github.com/google/uuid"
+	"github.com/guregu/null/v5"
 	"gocloud.dev/pubsub"
 )
 
@@ -60,11 +64,17 @@ func (w *ProcessorWorker) Start() error {
 				cancel()
 				continue
 			}
+			processingStartedAt := time.Now()
+			span := sentry.StartTransaction(ctx, "processor.process_submission", sentry.WithOpName("task.processor.process"), sentry.WithTransactionSource(sentry.SourceCustom))
+			ctx = span.Context()
+			span.SetData("eyrie.monitor_id", request.MonitorID)
+			span.SetData("eyrie.probe_type", request.ProbeType)
 
 			monitor, ok := w.findMonitor(request.MonitorID)
 			if !ok {
 				slog.ErrorContext(ctx, "monitor not found for submission", slog.String("monitor_id", request.MonitorID))
 				message.Ack()
+				span.Finish()
 				cancel()
 				continue
 			}
@@ -74,6 +84,7 @@ func (w *ProcessorWorker) Start() error {
 			if err != nil {
 				slog.ErrorContext(ctx, "looking back historical submissions", slog.String("error", err.Error()))
 				message.Ack()
+				span.Finish()
 				cancel()
 				continue
 			}
@@ -85,6 +96,7 @@ func (w *ProcessorWorker) Start() error {
 			if err != nil {
 				slog.ErrorContext(ctx, "loading incident state", slog.String("error", err.Error()))
 				message.Ack()
+				span.Finish()
 				cancel()
 				continue
 			}
@@ -93,6 +105,15 @@ func (w *ProcessorWorker) Start() error {
 				if err := w.storeIncidentState(ctx, request.MonitorID, evaluation); err != nil {
 					slog.ErrorContext(ctx, "storing incident state", slog.String("error", err.Error()))
 					message.Ack()
+					span.Finish()
+					cancel()
+					continue
+				}
+
+				if err := w.syncProgrammaticIncident(ctx, monitor, evaluation); err != nil {
+					slog.ErrorContext(ctx, "syncing programmatic incident", slog.String("error", err.Error()))
+					message.Ack()
+					span.Finish()
 					cancel()
 					continue
 				}
@@ -100,12 +121,17 @@ func (w *ProcessorWorker) Start() error {
 				if err := w.publishAlert(ctx, monitor, evaluation, previous); err != nil {
 					slog.ErrorContext(ctx, "publishing alert", slog.String("error", err.Error()))
 					message.Ack()
+					span.Finish()
 					cancel()
 					continue
 				}
+
+				sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.incident.transitions", 1, sentry.WithAttributes(attribute.String("previous_status", previous.Status), attribute.String("next_status", evaluation.Status), attribute.String("next_scope", evaluation.Scope), attribute.String("probe_type", string(monitor.EffectiveType()))))
 			}
 
 			message.Ack()
+			sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.processor.processing.duration", float64(time.Since(processingStartedAt).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", string(monitor.EffectiveType()))))
+			span.Finish()
 			cancel()
 		}
 	}
@@ -462,4 +488,236 @@ func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, cur
 			"scope":      current.Scope,
 		},
 	})
+}
+
+func (w *ProcessorWorker) syncProgrammaticIncident(ctx context.Context, monitor Monitor, evaluation IncidentEvaluation) error {
+	activeIncident, found, err := w.loadActiveProgrammaticIncident(ctx, monitor.ID)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case !evaluation.HasActiveIncident():
+		if !found {
+			return nil
+		}
+		return w.resolveProgrammaticIncident(ctx, activeIncident)
+	case !found:
+		return w.createProgrammaticIncident(ctx, monitor, evaluation)
+	default:
+		return w.updateProgrammaticIncident(ctx, activeIncident, monitor, evaluation)
+	}
+}
+
+func (w *ProcessorWorker) loadActiveProgrammaticIncident(ctx context.Context, monitorID string) (MonitorIncident, bool, error) {
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return MonitorIncident{}, false, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	var incident MonitorIncident
+	err = conn.QueryRowContext(ctx, `
+		SELECT id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, started_at, resolved_at, created_at, updated_at
+		FROM monitor_incidents
+		WHERE monitor_id = ? AND source = ? AND resolved_at IS NULL
+		ORDER BY started_at DESC
+		LIMIT 1
+	`, monitorID, IncidentSourceProgrammatic).Scan(
+		&incident.ID,
+		&incident.MonitorID,
+		&incident.Source,
+		&incident.LifecycleState,
+		&incident.AutoImpact,
+		&incident.Impact,
+		&incident.AutoTitle,
+		&incident.AutoBody,
+		&incident.Title,
+		&incident.Body,
+		&incident.Status,
+		&incident.Scope,
+		&incident.AffectedRegions,
+		&incident.StartedAt,
+		&incident.ResolvedAt,
+		&incident.CreatedAt,
+		&incident.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MonitorIncident{}, false, nil
+		}
+		return MonitorIncident{}, false, fmt.Errorf("querying active incident: %w", err)
+	}
+
+	return incident, true, nil
+}
+
+func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monitor Monitor, evaluation IncidentEvaluation) error {
+	now := time.Now().UTC()
+	incident := MonitorIncident{
+		ID:              uuid.NewString(),
+		MonitorID:       monitor.ID,
+		Source:          IncidentSourceProgrammatic,
+		LifecycleState:  IncidentLifecycleInvestigating,
+		AutoImpact:      evaluation.Impact(),
+		Impact:          evaluation.Impact(),
+		AutoTitle:       evaluation.ProgrammaticTitle(monitor),
+		AutoBody:        evaluation.Reason,
+		Title:           evaluation.ProgrammaticTitle(monitor),
+		Body:            evaluation.Reason,
+		Status:          evaluation.Status,
+		Scope:           evaluation.Scope,
+		AffectedRegions: evaluation.RegionsJSON(),
+		StartedAt:       now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	tx, err := w.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("beginning incident transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO monitor_incidents (
+			id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, started_at, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, incident.ID, incident.MonitorID, incident.Source, incident.LifecycleState, incident.AutoImpact, incident.Impact, incident.AutoTitle, incident.AutoBody, incident.Title, incident.Body, incident.Status, incident.Scope, incident.AffectedRegions, incident.StartedAt, incident.CreatedAt, incident.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("inserting programmatic incident: %w", err)
+	}
+
+	if err := insertIncidentEventTx(ctx, tx, incident, IncidentEventTypeCreated, incident.Title, incident.Body, now); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing incident transaction: %w", err)
+	}
+	return nil
+}
+
+func (w *ProcessorWorker) updateProgrammaticIncident(ctx context.Context, incident MonitorIncident, monitor Monitor, evaluation IncidentEvaluation) error {
+	autoImpact := evaluation.Impact()
+	autoTitle := evaluation.ProgrammaticTitle(monitor)
+	autoBody := evaluation.Reason
+	affectedRegions := evaluation.RegionsJSON()
+
+	updatedImpact := preserveManualString(incident.Impact, incident.AutoImpact, autoImpact)
+	updatedTitle := preserveManualString(incident.Title, incident.AutoTitle, autoTitle)
+	updatedBody := preserveManualString(incident.Body, incident.AutoBody, autoBody)
+	lifecycleState := incident.LifecycleState
+	if lifecycleState == "" {
+		lifecycleState = IncidentLifecycleInvestigating
+	}
+
+	now := time.Now().UTC()
+	tx, err := w.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("beginning incident transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE monitor_incidents
+		SET
+			auto_impact = ?,
+			impact = ?,
+			auto_title = ?,
+			auto_body = ?,
+			title = ?,
+			body = ?,
+			lifecycle_state = ?,
+			status = ?,
+			scope = ?,
+			affected_regions = ?,
+			updated_at = ?
+		WHERE id = ?
+	`, autoImpact, updatedImpact, autoTitle, autoBody, updatedTitle, updatedBody, lifecycleState, evaluation.Status, evaluation.Scope, affectedRegions, now, incident.ID)
+	if err != nil {
+		return fmt.Errorf("updating programmatic incident: %w", err)
+	}
+
+	incident.AutoImpact = autoImpact
+	incident.Impact = updatedImpact
+	incident.AutoTitle = autoTitle
+	incident.AutoBody = autoBody
+	incident.Title = updatedTitle
+	incident.Body = updatedBody
+	incident.Status = evaluation.Status
+	incident.Scope = evaluation.Scope
+	incident.AffectedRegions = affectedRegions
+	incident.UpdatedAt = now
+	incident.LifecycleState = lifecycleState
+
+	if err := insertIncidentEventTx(ctx, tx, incident, IncidentEventTypeUpdated, updatedTitle, updatedBody, now); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing incident transaction: %w", err)
+	}
+	return nil
+}
+
+func (w *ProcessorWorker) resolveProgrammaticIncident(ctx context.Context, incident MonitorIncident) error {
+	now := time.Now().UTC()
+	resolutionBody := fmt.Sprintf("Monitor recovered from %s %s", incident.Scope, incident.Status)
+
+	tx, err := w.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("beginning incident transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE monitor_incidents
+		SET
+			lifecycle_state = ?,
+			status = ?,
+			scope = ?,
+			resolved_at = ?,
+			updated_at = ?
+		WHERE id = ?
+	`, IncidentLifecycleResolved, MonitorStatusHealthy, MonitorScopeHealthy, now, now, incident.ID)
+	if err != nil {
+		return fmt.Errorf("resolving programmatic incident: %w", err)
+	}
+
+	incident.LifecycleState = IncidentLifecycleResolved
+	incident.Status = MonitorStatusHealthy
+	incident.Scope = MonitorScopeHealthy
+	incident.ResolvedAt = null.TimeFrom(now)
+	incident.UpdatedAt = now
+
+	if err := insertIncidentEventTx(ctx, tx, incident, IncidentEventTypeResolved, incident.Title, resolutionBody, now); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing incident transaction: %w", err)
+	}
+	return nil
+}
+
+func insertIncidentEventTx(ctx context.Context, tx *sql.Tx, incident MonitorIncident, eventType string, title string, body string, createdAt time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO monitor_incident_events (
+			id, incident_id, monitor_id, event_type, source, lifecycle_state, impact, title, body, status, scope, affected_regions, created_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, uuid.NewString(), incident.ID, incident.MonitorID, eventType, incident.Source, incident.LifecycleState, incident.Impact, title, body, incident.Status, incident.Scope, incident.AffectedRegions, createdAt)
+	if err != nil {
+		return fmt.Errorf("inserting incident event: %w", err)
+	}
+	return nil
+}
+
+func preserveManualString(current string, previousAuto string, nextAuto string) string {
+	if current == "" || current == previousAuto {
+		return nextAuto
+	}
+	return current
 }
