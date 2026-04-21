@@ -77,7 +77,16 @@ func main() {
 			}
 		}
 
-		if err := initSentry(serverConfig.Sentry.Dsn, serverConfig.Sentry.ErrorSampleRate, serverConfig.Sentry.TracesSampleRate, serverConfig.Sentry.Debug, Version); err != nil {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              serverConfig.Sentry.Dsn,
+			SampleRate:       serverConfig.Sentry.ErrorSampleRate,
+			EnableTracing:    true,
+			TracesSampleRate: serverConfig.Sentry.TracesSampleRate,
+			EnableLogs:       true,
+			AttachStacktrace: true,
+			Debug:            serverConfig.Sentry.Debug,
+			Release:          Version,
+		}); err != nil {
 			slog.Error("sentry initialization failed", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
@@ -254,7 +263,16 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := initSentry(checkerConfig.Sentry.Dsn, checkerConfig.Sentry.ErrorSampleRate, checkerConfig.Sentry.TracesSampleRate, checkerConfig.Sentry.Debug, Version); err != nil {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              checkerConfig.Sentry.Dsn,
+			SampleRate:       checkerConfig.Sentry.ErrorSampleRate,
+			EnableTracing:    true,
+			TracesSampleRate: checkerConfig.Sentry.TracesSampleRate,
+			EnableLogs:       true,
+			AttachStacktrace: true,
+			Debug:            checkerConfig.Sentry.Debug,
+			Release:          Version,
+		}); err != nil {
 			slog.Error("sentry initialization failed", slog.String("error", err.Error()))
 			os.Exit(1)
 		}

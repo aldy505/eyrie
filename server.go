@@ -1012,15 +1012,9 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 	if probeType == "" {
 		probeType = string(MonitorTypeHTTP)
 	}
-	sentryCountMetric(ctx, "eyrie.monitor.submissions.received", 1,
-		attribute.String("probe_type", probeType),
-		attribute.String("region", region),
-	)
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.received", 1, sentry.WithAttributes(attribute.String("probe_type", probeType), attribute.String("region", region)))
 	if request.LatencyMs > 0 {
-		sentryDistributionMetric(ctx, "eyrie.monitor.submissions.received_latency", float64(request.LatencyMs), sentry.UnitMillisecond,
-			attribute.String("probe_type", probeType),
-			attribute.String("region", region),
-		)
+		sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.submissions.received_latency", float64(request.LatencyMs), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", probeType), attribute.String("region", region)))
 	}
 
 	// Enqueue the submission to the task queue

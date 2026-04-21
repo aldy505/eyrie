@@ -65,7 +65,7 @@ func (w *ProcessorWorker) Start() error {
 				continue
 			}
 			processingStartedAt := time.Now()
-			span := startSentryTransaction(ctx, "processor.process_submission", "task.processor.process")
+			span := sentry.StartTransaction(ctx, "processor.process_submission", sentry.WithOpName("task.processor.process"), sentry.WithTransactionSource(sentry.SourceCustom))
 			ctx = span.Context()
 			span.SetData("eyrie.monitor_id", request.MonitorID)
 			span.SetData("eyrie.probe_type", request.ProbeType)
@@ -126,18 +126,11 @@ func (w *ProcessorWorker) Start() error {
 					continue
 				}
 
-				sentryCountMetric(ctx, "eyrie.incident.transitions", 1,
-					attribute.String("previous_status", previous.Status),
-					attribute.String("next_status", evaluation.Status),
-					attribute.String("next_scope", evaluation.Scope),
-					attribute.String("probe_type", string(monitor.EffectiveType())),
-				)
+				sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.incident.transitions", 1, sentry.WithAttributes(attribute.String("previous_status", previous.Status), attribute.String("next_status", evaluation.Status), attribute.String("next_scope", evaluation.Scope), attribute.String("probe_type", string(monitor.EffectiveType()))))
 			}
 
 			message.Ack()
-			sentryDistributionMetric(ctx, "eyrie.processor.processing.duration", float64(time.Since(processingStartedAt).Milliseconds()), sentry.UnitMillisecond,
-				attribute.String("probe_type", string(monitor.EffectiveType())),
-			)
+			sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.processor.processing.duration", float64(time.Since(processingStartedAt).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", string(monitor.EffectiveType()))))
 			span.Finish()
 			cancel()
 		}
