@@ -262,3 +262,97 @@ func TestMonitorIncidentsHandlerReturnsActiveIncidentMetadata(t *testing.T) {
 		t.Fatalf("expected scope %q, got %q", MonitorScopeGlobal, incident.Scope)
 	}
 }
+
+func TestMonitorIncidentsHandlerNormalizesNullAffectedRegions(t *testing.T) {
+	monitorID := "test-incidents-handler-null-regions"
+	now := time.Now().UTC()
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+
+		if _, err := conn.ExecContext(ctx, `DELETE FROM monitor_incident_state WHERE monitor_id = ?`, monitorID); err != nil {
+			t.Fatalf("failed to clean up monitor_incident_state table: %v", err)
+		}
+		if _, err := conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID); err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:       db,
+		shutdown: make(chan struct{}),
+	}
+
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		LatencyMs:  123,
+		StatusCode: 200,
+		Timestamp:  now,
+		Timings:    CheckerTraceTimings{},
+	}, "us-east-1"); err != nil {
+		t.Fatalf("failed to seed monitor history: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO monitor_incident_state (
+			monitor_id, status, scope, affected_regions, reason, last_transition_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, monitorID, MonitorStatusHealthy, MonitorScopeHealthy, `null`, "", now, now); err != nil {
+		t.Fatalf("failed to seed monitor_incident_state: %v", err)
+	}
+
+	server := &Server{
+		db:           db,
+		serverConfig: ServerConfig{},
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:   monitorID,
+					Name: "Test Incident Monitor",
+					HTTP: &MonitorHTTPConfig{
+						URL: "https://example.com",
+					},
+				},
+			},
+		},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/monitor-incidents", nil)
+	recorder := httptest.NewRecorder()
+
+	server.MonitorIncidentsHandler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var response MonitorIncidentsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(response.Incidents) != 1 {
+		t.Fatalf("expected 1 incident, got %d", len(response.Incidents))
+	}
+
+	if got := response.Incidents[0].AffectedRegions; got == nil || len(got) != 0 {
+		t.Fatalf("expected empty affected regions slice, got %#v", got)
+	}
+}
