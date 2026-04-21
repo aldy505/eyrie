@@ -68,11 +68,12 @@ func (e IncidentEvaluation) RegionsJSON() string {
 }
 
 func ParseRegionsJSON(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "null" {
 		return []string{}
 	}
 	var regions []string
-	if err := json.Unmarshal([]byte(raw), &regions); err != nil {
+	if err := json.Unmarshal([]byte(trimmed), &regions); err != nil || regions == nil {
 		return []string{}
 	}
 	slices.Sort(regions)
