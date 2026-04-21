@@ -29,8 +29,8 @@ CREATE TABLE IF NOT EXISTS monitor_incident_state (
     scope VARCHAR(32) NOT NULL DEFAULT 'healthy',
     affected_regions TEXT NOT NULL DEFAULT '[]',
     reason TEXT NOT NULL DEFAULT '',
-    last_transition_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    last_transition_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 -- +goose StatementEnd
 

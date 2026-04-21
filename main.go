@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
@@ -40,8 +41,9 @@ func main() {
 	}
 
 	exitSignal := make(chan os.Signal, 1)
-	signal.Notify(exitSignal, os.Interrupt)
+	signal.Notify(exitSignal, os.Interrupt, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer signal.Stop(exitSignal)
 
 	switch *mode {
 	case "server":
@@ -96,7 +98,7 @@ func main() {
 
 		connector, err := duckdb.NewConnector(serverConfig.Database.Path, nil)
 		if err != nil {
-			slog.Error("failed to create duckdb connector", slog.String("error", err.Error()))
+			slog.Error("failed to create duckdb connector", slog.String("error", duckDBStartupRecoveryHint(serverConfig.Database.Path, err).Error()))
 			os.Exit(1)
 		}
 
@@ -159,7 +161,10 @@ func main() {
 			os.Exit(1)
 		}
 
+		shutdownComplete := make(chan struct{})
 		go func() {
+			defer close(shutdownComplete)
+
 			<-exitSignal
 			cancel()
 
@@ -249,6 +254,9 @@ func main() {
 			slog.Error("server error", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
+		if ctx.Err() != nil {
+			<-shutdownComplete
+		}
 
 		slog.Info("shutting down server")
 	case "checker":
@@ -295,7 +303,10 @@ func main() {
 			os.Exit(1)
 		}
 
+		shutdownComplete := make(chan struct{})
 		go func() {
+			defer close(shutdownComplete)
+
 			<-exitSignal
 			cancel()
 
@@ -310,6 +321,9 @@ func main() {
 		if err := checker.Start(); err != nil {
 			slog.Error("checker error", slog.String("error", err.Error()))
 			os.Exit(1)
+		}
+		if ctx.Err() != nil {
+			<-shutdownComplete
 		}
 
 		slog.Info("shutting down checker")

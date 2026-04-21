@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS monitor_historical (
     timing_dns_lookup_done_ms INTEGER,
     timing_tls_handshake_start_ms INTEGER,
     timing_tls_handshake_done_ms INTEGER,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (monitor_id, region, created_at)
 );
 

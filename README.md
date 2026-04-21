@@ -161,6 +161,16 @@ npm run lint
 npm run build
 ```
 
+## DuckDB recovery note
+
+If server mode fails during startup with a DuckDB error like `Failure while replaying WAL file ... GetDefaultDatabase with no default database set`, DuckDB is crashing while recovering `database.db.wal` before Eyrie can run migrations.
+
+1. Back up both the main database file and its WAL first.
+2. If the WAL only contains disposable recent writes, remove the `.wal` file and restart Eyrie.
+3. If the WAL may contain data you need to preserve, recover from a copy by exporting into a fresh database with a newer DuckDB build instead of deleting the WAL outright.
+
+Newer Eyrie builds shut the server down cleanly on both `SIGINT` and `SIGTERM`, which is important when the service is managed by systemd or another process supervisor.
+
 ## Repository layout
 
 - Go sources live at the repository root
