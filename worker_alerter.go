@@ -44,10 +44,10 @@ func (w *AlerterWorker) Start() error {
 		default:
 			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
 			message, err := w.subscriber.Receive(ctx)
-			cancel()
 			if err != nil {
 				slog.Error("receiving message for alert queue", slog.String("error", err.Error()))
 				time.Sleep(10 * time.Millisecond)
+				cancel()
 				continue
 			}
 
@@ -69,6 +69,7 @@ func (w *AlerterWorker) Start() error {
 					slog.String("scope", alert.Scope))
 				sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.alert.deliveries.skipped", 1, sentry.WithAttributes(attribute.String("status", alert.Status), attribute.String("scope", alert.Scope)))
 				message.Ack()
+				cancel()
 				continue
 			}
 
@@ -98,6 +99,7 @@ func (w *AlerterWorker) Start() error {
 				}
 				sendCancel()
 				span.Finish()
+				cancel()
 				continue
 			}
 
@@ -105,6 +107,7 @@ func (w *AlerterWorker) Start() error {
 			message.Ack()
 			sendCancel()
 			span.Finish()
+			cancel()
 		}
 	}
 }

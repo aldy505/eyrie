@@ -629,12 +629,13 @@ func (w *ProcessorWorker) updateProgrammaticIncident(ctx context.Context, incide
 			auto_body = ?,
 			title = ?,
 			body = ?,
+			lifecycle_state = ?,
 			status = ?,
 			scope = ?,
 			affected_regions = ?,
 			updated_at = ?
 		WHERE id = ?
-	`, autoImpact, updatedImpact, autoTitle, autoBody, updatedTitle, updatedBody, evaluation.Status, evaluation.Scope, affectedRegions, now, incident.ID)
+	`, autoImpact, updatedImpact, autoTitle, autoBody, updatedTitle, updatedBody, lifecycleState, evaluation.Status, evaluation.Scope, affectedRegions, now, incident.ID)
 	if err != nil {
 		return fmt.Errorf("updating programmatic incident: %w", err)
 	}
