@@ -14,10 +14,10 @@ CREATE TABLE IF NOT EXISTS monitor_incidents (
     status VARCHAR(32) NOT NULL DEFAULT 'healthy',
     scope VARCHAR(32) NOT NULL DEFAULT 'healthy',
     affected_regions TEXT NOT NULL DEFAULT '[]',
-    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ NOT NULL,
     resolved_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_monitor_incidents_monitor_id
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS monitor_incident_events (
     status VARCHAR(32) NOT NULL DEFAULT 'healthy',
     scope VARCHAR(32) NOT NULL DEFAULT 'healthy',
     affected_regions TEXT NOT NULL DEFAULT '[]',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_monitor_incident_events_incident_id
