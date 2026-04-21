@@ -246,3 +246,15 @@ func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 		t.Errorf("expected success_rate between 86-87 after upsert, got %d", successRate)
 	}
 }
+
+func TestParseAggregationDateSupportsRFC3339Timestamp(t *testing.T) {
+	date, err := parseAggregationDate("2026-04-21T00:00:00Z")
+	if err != nil {
+		t.Fatalf("expected timestamp date to parse, got error: %v", err)
+	}
+
+	expected := time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC)
+	if !date.Equal(expected) {
+		t.Fatalf("expected parsed date %s, got %s", expected, date)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -161,7 +162,7 @@ func (w *IngesterWorker) aggregateAllMonitors() {
 			continue
 		}
 
-		date, err := time.Parse("2006-01-02", dateStr)
+		date, err := parseAggregationDate(dateStr)
 		if err != nil {
 			slog.ErrorContext(ctx, "parsing date", slog.String("error", err.Error()), slog.String("date", dateStr))
 			continue
@@ -190,6 +191,18 @@ func (w *IngesterWorker) aggregateAllMonitors() {
 
 	sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.ingester.aggregation.duration", float64(time.Since(aggregationStartedAt).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond))
 	slog.InfoContext(ctx, "aggregation completed", slog.Int("task_count", len(tasks)))
+}
+
+func parseAggregationDate(raw string) (time.Time, error) {
+	trimmed := strings.TrimSpace(raw)
+	for _, layout := range []string{"2006-01-02", time.RFC3339Nano, time.RFC3339} {
+		parsed, err := time.Parse(layout, trimmed)
+		if err == nil {
+			return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC), nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("unsupported aggregation date format %q", raw)
 }
 
 func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission CheckerSubmissionRequest, region string) error {
