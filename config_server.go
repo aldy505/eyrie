@@ -108,6 +108,7 @@ type ServerConfig struct {
 
 func (c ServerConfig) Validate() error {
 	seenCheckerNames := make(map[string]struct{}, len(c.RegisteredCheckers))
+	seenAPIKeys := make(map[string]struct{}, len(c.RegisteredCheckers))
 	for _, checker := range c.RegisteredCheckers {
 		if checker.Region == "" {
 			return fmt.Errorf("registered checker %q: region is required", checker.EffectiveName())
@@ -119,6 +120,10 @@ func (c ServerConfig) Validate() error {
 			return fmt.Errorf("registered checker %q: duplicate checker name", checker.EffectiveName())
 		}
 		seenCheckerNames[checker.EffectiveName()] = struct{}{}
+		if _, exists := seenAPIKeys[checker.ApiKey]; exists {
+			return fmt.Errorf("registered checker %q: duplicate api_key", checker.EffectiveName())
+		}
+		seenAPIKeys[checker.ApiKey] = struct{}{}
 	}
 
 	return nil

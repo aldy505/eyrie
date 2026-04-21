@@ -74,7 +74,7 @@ Everything else can remain private if you only need remote checker registration 
 
 ## Checker targeting
 
-You can optionally pin a monitor to specific checkers with `checker_names`. These names match `registered_checkers[].name` in the server config. If a checker name is omitted, Eyrie falls back to the checker `region` as its effective name for backward compatibility.
+You can optionally pin a monitor to specific checkers with `checker_names`. These values must match each checker's effective name: `registered_checkers[].name` when it is set, otherwise the checker's `region`. In checker mode, the same fallback applies when `name` or `CHECKER_NAME` is unset, so the checker identifies itself by `region`.
 
 ```yaml
 registered_checkers:
