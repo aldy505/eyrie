@@ -2,6 +2,7 @@ package main
 
 type CheckerConfig struct {
 	UpstreamURL string `yaml:"upstream_url" envconfig:"UPSTREAM_URL"`
+	Name        string `yaml:"name" envconfig:"CHECKER_NAME"`
 	Region      string `yaml:"region" envconfig:"REGION"`
 	ApiKey      string `yaml:"api_key" envconfig:"API_KEY"`
 	Sentry      struct {
@@ -12,4 +13,12 @@ type CheckerConfig struct {
 		Debug                 bool    `yaml:"debug" default:"false" envconfig:"SENTRY_DEBUG"`
 		TraceOutgoingRequests bool    `yaml:"trace_outgoing_requests" default:"false" envconfig:"SENTRY_TRACE_OUTGOING_REQUESTS"`
 	} `yaml:"sentry"`
+}
+
+func (c CheckerConfig) EffectiveName() string {
+	if c.Name != "" {
+		return c.Name
+	}
+
+	return c.Region
 }

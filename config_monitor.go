@@ -76,11 +76,12 @@ type MonitorClickHouseConfig struct {
 }
 
 type Monitor struct {
-	ID          string      `yaml:"id" json:"id"`
-	Name        string      `yaml:"name" json:"name"`
-	Description null.String `yaml:"description" json:"description"`
-	Interval    string      `yaml:"interval" json:"interval" default:"1m"`
-	Type        MonitorType `yaml:"type" json:"type" default:"http"`
+	ID           string      `yaml:"id" json:"id"`
+	Name         string      `yaml:"name" json:"name"`
+	Description  null.String `yaml:"description" json:"description"`
+	Interval     string      `yaml:"interval" json:"interval" default:"1m"`
+	Type         MonitorType `yaml:"type" json:"type" default:"http"`
+	CheckerNames []string    `yaml:"checker_names" json:"checker_names,omitempty"`
 
 	// Legacy top-level HTTP fields are preserved for backwards compatibility.
 	Method              string            `yaml:"method" json:"method" default:"GET"`
@@ -111,6 +112,64 @@ type Group struct {
 type MonitorConfig struct {
 	Monitors []Monitor `yaml:"monitors"`
 	Groups   []Group   `yaml:"groups"`
+}
+
+func (c MonitorConfig) Validate(registeredCheckers []RegisteredChecker) error {
+	knownCheckerNames := make(map[string]struct{}, len(registeredCheckers))
+	for _, checker := range registeredCheckers {
+		knownCheckerNames[checker.EffectiveName()] = struct{}{}
+	}
+
+	for _, monitor := range c.Monitors {
+		if err := monitor.Validate(); err != nil {
+			return err
+		}
+
+		seenCheckerNames := make(map[string]struct{}, len(monitor.CheckerNames))
+		for _, checkerName := range monitor.CheckerNames {
+			if _, exists := seenCheckerNames[checkerName]; exists {
+				return fmt.Errorf("monitor %s: duplicate checker_names entry %q", monitor.ID, checkerName)
+			}
+			if _, exists := knownCheckerNames[checkerName]; !exists {
+				return fmt.Errorf("monitor %s: checker_names contains unknown checker %q", monitor.ID, checkerName)
+			}
+			seenCheckerNames[checkerName] = struct{}{}
+		}
+	}
+
+	return nil
+}
+
+func (c MonitorConfig) ForChecker(checkerName string) MonitorConfig {
+	filteredConfig := MonitorConfig{
+		Monitors: make([]Monitor, 0, len(c.Monitors)),
+		Groups:   make([]Group, 0, len(c.Groups)),
+	}
+
+	allowedMonitorIDs := make(map[string]struct{}, len(c.Monitors))
+	for _, monitor := range c.Monitors {
+		if monitor.RunsOnChecker(checkerName) {
+			filteredConfig.Monitors = append(filteredConfig.Monitors, monitor)
+			allowedMonitorIDs[monitor.ID] = struct{}{}
+		}
+	}
+
+	for _, group := range c.Groups {
+		filteredMonitorIDs := make([]string, 0, len(group.MonitorIDs))
+		for _, monitorID := range group.MonitorIDs {
+			if _, exists := allowedMonitorIDs[monitorID]; exists {
+				filteredMonitorIDs = append(filteredMonitorIDs, monitorID)
+			}
+		}
+		if len(filteredMonitorIDs) == 0 {
+			continue
+		}
+
+		group.MonitorIDs = filteredMonitorIDs
+		filteredConfig.Groups = append(filteredConfig.Groups, group)
+	}
+
+	return filteredConfig
 }
 
 func (m Monitor) EffectiveType() MonitorType {
@@ -226,6 +285,10 @@ func (m Monitor) IsSuccessfulStatus(statusCode int, explicitSuccess bool) bool {
 	default:
 		return explicitSuccess
 	}
+}
+
+func (m Monitor) RunsOnChecker(checkerName string) bool {
+	return len(m.CheckerNames) == 0 || slices.Contains(m.CheckerNames, checkerName)
 }
 
 func (m Monitor) Validate() error {

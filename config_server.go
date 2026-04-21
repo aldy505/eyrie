@@ -1,6 +1,9 @@
 package main
 
-import "log/slog"
+import (
+	"fmt"
+	"log/slog"
+)
 
 type DatasetConfig struct {
 	RetentionDays                    int     `yaml:"retention_days" default:"90"`
@@ -42,6 +45,20 @@ type NtfyAlertingConfig struct {
 	Priority    int    `yaml:"priority" default:"3"`
 }
 
+type RegisteredChecker struct {
+	Name   string `yaml:"name"`
+	Region string `yaml:"region"`
+	ApiKey string `yaml:"api_key"`
+}
+
+func (c RegisteredChecker) EffectiveName() string {
+	if c.Name != "" {
+		return c.Name
+	}
+
+	return c.Region
+}
+
 type ServerConfig struct {
 	Server struct {
 		Host string `yaml:"host"`
@@ -53,11 +70,8 @@ type ServerConfig struct {
 		Title           string `yaml:"title" default:"Status Page"`
 		ShowLastUpdated bool   `yaml:"show_last_updated" default:"true"`
 	} `yaml:"metadata"`
-	RegisteredCheckers []struct {
-		Region string `yaml:"region"`
-		ApiKey string `yaml:"api_key"`
-	} `yaml:"registered_checkers"`
-	Database struct {
+	RegisteredCheckers []RegisteredChecker `yaml:"registered_checkers"`
+	Database           struct {
 		Path string `yaml:"path" default:"eyrie.db"`
 	} `yaml:"database"`
 	TaskQueue struct {
@@ -90,4 +104,37 @@ type ServerConfig struct {
 		Debug                 bool    `yaml:"debug" default:"false"`
 		TraceOutgoingRequests bool    `yaml:"trace_outgoing_requests" default:"false"`
 	} `yaml:"sentry"`
+}
+
+func (c ServerConfig) Validate() error {
+	seenCheckerNames := make(map[string]struct{}, len(c.RegisteredCheckers))
+	for _, checker := range c.RegisteredCheckers {
+		if checker.Region == "" {
+			return fmt.Errorf("registered checker %q: region is required", checker.EffectiveName())
+		}
+		if checker.ApiKey == "" {
+			return fmt.Errorf("registered checker %q: api_key is required", checker.EffectiveName())
+		}
+		if _, exists := seenCheckerNames[checker.EffectiveName()]; exists {
+			return fmt.Errorf("registered checker %q: duplicate checker name", checker.EffectiveName())
+		}
+		seenCheckerNames[checker.EffectiveName()] = struct{}{}
+	}
+
+	return nil
+}
+
+func (c ServerConfig) FindRegisteredChecker(name string, region string, apiKey string) (RegisteredChecker, bool) {
+	for _, checker := range c.RegisteredCheckers {
+		if checker.ApiKey != apiKey || checker.Region != region {
+			continue
+		}
+		if name != "" && name != checker.EffectiveName() {
+			continue
+		}
+
+		return checker, true
+	}
+
+	return RegisteredChecker{}, false
 }
