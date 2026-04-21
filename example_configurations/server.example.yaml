@@ -8,15 +8,20 @@ metadata:
   show_last_updated: true
 
 registered_checkers:
-  - region: "us-east-1"
+  - name: "us-east-1-public-checker"
+    region: "us-east-1"
     api_key: "us-east-1-api-key-here"
-  - region: "us-west-1"
+  - name: "us-west-1-public-checker"
+    region: "us-west-1"
     api_key: "us-west-1-api-key-here"
-  - region: "eu-west-1"
+  - name: "eu-west-1-public-checker"
+    region: "eu-west-1"
     api_key: "eu-west-1-api-key-here"
-  - region: "eu-central-1"
+  - name: "eu-central-1-public-checker"
+    region: "eu-central-1"
     api_key: "eu-central-1-api-key-here"
-  - region: "ap-southeast-1"
+  - name: "ap-southeast-1-public-checker"
+    region: "ap-southeast-1"
     api_key: "ap-southeast-1-api-key-here"
 
 database:

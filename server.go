@@ -907,6 +907,7 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 }
 
 type CheckerRegistrationRequest struct {
+	Name   string `json:"name,omitempty"`
 	Region string `json:"region"`
 }
 
@@ -925,34 +926,31 @@ func (s *Server) CheckerRegistration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate API key
-	var validChecker bool
-	for _, checker := range s.serverConfig.RegisteredCheckers {
-		if checker.Region == request.Region && checker.ApiKey == apiKey {
-			validChecker = true
-			break
-		}
-	}
-
+	checker, validChecker := s.serverConfig.FindRegisteredChecker(request.Name, request.Region, apiKey)
 	if !validChecker {
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(CommonErrorResponse{
-			Error: "invalid region",
+			Error: "invalid checker",
 		})
 		return
 	}
 
+	checkerName := checker.EffectiveName()
+
 	if hub := sentry.GetHubFromContext(r.Context()); hub != nil {
 		hub.Scope().SetTag("eyrie.checker_region", request.Region)
+		hub.Scope().SetTag("eyrie.checker_name", checkerName)
 	}
 	if span := sentry.SpanFromContext(r.Context()); span != nil {
 		span.SetData("eyrie.checker_region", request.Region)
+		span.SetData("eyrie.checker_name", checkerName)
 	}
 
-	slog.InfoContext(r.Context(), "checker registered", slog.String("region", request.Region))
+	slog.InfoContext(r.Context(), "checker registered", slog.String("name", checkerName), slog.String("region", request.Region))
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(s.monitorConfig)
+	json.NewEncoder(w).Encode(s.monitorConfig.ForChecker(checkerName))
 }
 
 type CheckerSubmissionRequest struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -437,5 +438,84 @@ func TestServer_UptimeDataByRegionHandler_NotFound(t *testing.T) {
 
 	if response.Error != "monitor not found" {
 		t.Errorf("expected error 'monitor not found', got '%s'", response.Error)
+	}
+}
+
+func TestServer_CheckerRegistrationFiltersMonitorsByCheckerName(t *testing.T) {
+	server := &Server{
+		serverConfig: ServerConfig{
+			RegisteredCheckers: []RegisteredChecker{
+				{Name: "public-east", Region: "us-east-1", ApiKey: "east-key"},
+			},
+		},
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{ID: "global-http", Type: MonitorTypeHTTP, HTTP: &MonitorHTTPConfig{URL: "https://example.com"}},
+				{ID: "east-only", Type: MonitorTypeTCP, CheckerNames: []string{"public-east"}, TCP: MonitorTCPConfig{Address: "example.com:443"}},
+				{ID: "west-only", Type: MonitorTypeTCP, CheckerNames: []string{"public-west"}, TCP: MonitorTCPConfig{Address: "example.net:443"}},
+			},
+			Groups: []Group{
+				{ID: "group-1", Name: "Important", MonitorIDs: []string{"global-http", "east-only", "west-only"}},
+			},
+		},
+	}
+
+	requestBody := strings.NewReader(`{"name":"public-east","region":"us-east-1"}`)
+	req := httptest.NewRequest(http.MethodPost, "/checker/register", requestBody)
+	req.Header.Set("X-API-Key", "east-key")
+	w := httptest.NewRecorder()
+
+	server.CheckerRegistration(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status code %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response MonitorConfig
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(response.Monitors) != 2 {
+		t.Fatalf("expected 2 monitors, got %d", len(response.Monitors))
+	}
+	if response.Monitors[0].ID != "global-http" || response.Monitors[1].ID != "east-only" {
+		t.Fatalf("unexpected monitors returned: %#v", response.Monitors)
+	}
+	if len(response.Groups) != 1 || len(response.Groups[0].MonitorIDs) != 2 {
+		t.Fatalf("expected filtered group with 2 monitor IDs, got %#v", response.Groups)
+	}
+}
+
+func TestServer_CheckerRegistrationAllowsLegacyRegionOnlyRequest(t *testing.T) {
+	server := &Server{
+		serverConfig: ServerConfig{
+			RegisteredCheckers: []RegisteredChecker{
+				{Name: "public-east", Region: "us-east-1", ApiKey: "east-key"},
+			},
+		},
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{ID: "east-only", Type: MonitorTypeTCP, CheckerNames: []string{"public-east"}, TCP: MonitorTCPConfig{Address: "example.com:443"}},
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/checker/register", strings.NewReader(`{"region":"us-east-1"}`))
+	req.Header.Set("X-API-Key", "east-key")
+	w := httptest.NewRecorder()
+
+	server.CheckerRegistration(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status code %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response MonitorConfig
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(response.Monitors) != 1 || response.Monitors[0].ID != "east-only" {
+		t.Fatalf("unexpected legacy registration response: %#v", response.Monitors)
 	}
 }

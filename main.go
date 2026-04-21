@@ -57,6 +57,10 @@ func main() {
 			slog.Error("failed to unmarshal config file", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
+		if err := serverConfig.Validate(); err != nil {
+			slog.Error("invalid server config", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
 
 		monitorConfigFile, err := os.ReadFile(*monitorPath)
 		if err != nil {
@@ -70,11 +74,9 @@ func main() {
 			slog.Error("failed to unmarshal monitor file", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
-		for _, monitor := range monitorConfig.Monitors {
-			if err := monitor.Validate(); err != nil {
-				slog.Error("invalid monitor config", slog.String("error", err.Error()))
-				os.Exit(1)
-			}
+		if err := monitorConfig.Validate(serverConfig.RegisteredCheckers); err != nil {
+			slog.Error("invalid monitor config", slog.String("error", err.Error()))
+			os.Exit(1)
 		}
 
 		if err := sentry.Init(sentry.ClientOptions{

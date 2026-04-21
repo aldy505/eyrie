@@ -29,6 +29,9 @@ monitors:
     description: "This is an example monitor checking example.net"
     interval: "1m"
     type: "tcp"
+    checker_names:
+      - "us-east-1-public-checker"
+      - "us-west-1-public-checker"
     tcp:
       address: "example.net:443"
       use_tls: true
@@ -68,6 +71,8 @@ monitors:
     name: "Primary PostgreSQL"
     interval: "1m"
     type: "postgres"
+    checker_names:
+      - "us-east-1-public-checker"
     postgres:
       dsn: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       timeout_seconds: 10

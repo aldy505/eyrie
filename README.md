@@ -49,7 +49,7 @@ The server process:
 
 Each checker:
 
-- registers to the server with an API key and region
+- registers to the server with an API key, region, and optional checker name
 - downloads the current monitor configuration
 - executes checks on schedule
 - submits structured probe results back to the server
@@ -64,6 +64,35 @@ Each checker:
 | `GET` | `/monitor-incidents` | Current monitor health plus active incident metadata |
 | `POST` | `/checker/register` | Checker registration and config fetch |
 | `POST` | `/checker/submit` | Checker submission ingestion entrypoint |
+
+If a checker runs outside your private network and the server sits behind a reverse proxy, the minimum paths to expose are:
+
+- `POST /checker/register`
+- `POST /checker/submit`
+
+Everything else can remain private if you only need remote checker registration and result submission.
+
+## Checker targeting
+
+You can optionally pin a monitor to specific checkers with `checker_names`. These values must match each checker's effective name: `registered_checkers[].name` when it is set, otherwise the checker's `region`. In checker mode, the same fallback applies when `name` or `CHECKER_NAME` is unset, so the checker identifies itself by `region`.
+
+```yaml
+registered_checkers:
+  - name: "us-east-1-public-checker"
+    region: "us-east-1"
+    api_key: "us-east-1-api-key-here"
+
+monitors:
+  - id: "primary-postgres"
+    name: "Primary PostgreSQL"
+    type: "postgres"
+    checker_names:
+      - "us-east-1-public-checker"
+    postgres:
+      dsn: "postgres://postgres:postgres@10.0.0.5:5432/postgres?sslmode=disable"
+```
+
+Monitors without `checker_names` are still sent to every checker.
 
 ## Incident model
 
@@ -104,7 +133,7 @@ go run . -mode=server -config=./example_configurations/server.example.yaml -moni
 ### Run one or more checkers
 
 ```bash
-UPSTREAM_URL="http://localhost:8600" REGION="us-east-1" API_KEY="us-east-1-api-key-here" go run . -mode=checker -config=./example_configurations/checker.example.yaml
+UPSTREAM_URL="http://localhost:8600" CHECKER_NAME="us-east-1-public-checker" REGION="us-east-1" API_KEY="us-east-1-api-key-here" go run . -mode=checker -config=./example_configurations/checker.example.yaml
 ```
 
 ### Run the frontend in dev mode

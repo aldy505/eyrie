@@ -173,6 +173,7 @@ func (c *Checker) registerToUpstream(ctx context.Context) error {
 	}
 
 	requestBody, err := json.Marshal(CheckerRegistrationRequest{
+		Name:   c.config.EffectiveName(),
 		Region: c.config.Region,
 	})
 	if err != nil {

@@ -1,4 +1,5 @@
 upstream_url: "http://127.0.0.1:8600"
+name: "us-east-1-public-checker"
 region: "us-east-1"
 api_key: "us-east-1-api-key-here"
 
