@@ -62,3 +62,10 @@ alerting:
     topic_url: "https://ntfy.sh/eyrie-alerts"
     access_token: "ntfy-access-token"
     priority: 4
+
+sentry:
+  dsn: ""
+  error_sample_rate: 1.0
+  traces_sample_rate: 1.0
+  debug: false
+  trace_outgoing_requests: false

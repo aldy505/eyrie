@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+	"github.com/getsentry/sentry-go/attribute"
 	"gocloud.dev/pubsub"
 )
 
@@ -40,7 +42,7 @@ func (w *AlerterWorker) Start() error {
 		case <-w.shutdown:
 			return nil
 		default:
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
 			message, err := w.subscriber.Receive(ctx)
 			cancel()
 			if err != nil {
@@ -65,11 +67,17 @@ func (w *AlerterWorker) Start() error {
 					slog.String("monitor_id", alert.MonitorID),
 					slog.String("status", alert.Status),
 					slog.String("scope", alert.Scope))
+				sentryCountMetric(ctx, "eyrie.alert.deliveries.skipped", 1,
+					attribute.String("status", alert.Status),
+					attribute.String("scope", alert.Scope),
+				)
 				message.Ack()
 				continue
 			}
 
 			sendCtx, sendCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			span := startSentryTransaction(sendCtx, "alerter.send_alert", "task.alerter.process")
+			sendCtx = span.Context()
 			var sendErr error
 			deliveredCount := 0
 			for _, alerter := range w.alerters {
@@ -79,9 +87,12 @@ func (w *AlerterWorker) Start() error {
 				}
 				deliveredCount++
 			}
-			sendCancel()
 
 			if sendErr != nil {
+				sentryCountMetric(sendCtx, "eyrie.alert.deliveries.failed", 1,
+					attribute.String("status", alert.Status),
+					attribute.String("scope", alert.Scope),
+				)
 				slog.Error("sending alert",
 					slog.String("error", sendErr.Error()),
 					slog.Int("delivered_count", deliveredCount),
@@ -91,10 +102,18 @@ func (w *AlerterWorker) Start() error {
 				} else {
 					message.Ack()
 				}
+				sendCancel()
+				span.Finish()
 				continue
 			}
 
+			sentryCountMetric(sendCtx, "eyrie.alert.deliveries.sent", 1,
+				attribute.String("status", alert.Status),
+				attribute.String("scope", alert.Scope),
+			)
 			message.Ack()
+			sendCancel()
+			span.Finish()
 		}
 	}
 }

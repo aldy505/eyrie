@@ -1,3 +1,10 @@
 upstream_url: "http://127.0.0.1:8600"
 region: "us-east-1"
 api_key: "us-east-1-api-key-here"
+
+sentry:
+  dsn: ""
+  error_sample_rate: 1.0
+  traces_sample_rate: 1.0
+  debug: false
+  trace_outgoing_requests: true

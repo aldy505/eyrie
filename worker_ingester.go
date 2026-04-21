@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/getsentry/sentry-go/attribute"
 	"gocloud.dev/pubsub"
 )
 
@@ -40,16 +41,16 @@ func (w *IngesterWorker) Start() error {
 			return nil
 		default:
 			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
-			defer cancel()
 
 			message, err := w.subscriber.Receive(ctx)
 			if err != nil {
 				slog.ErrorContext(ctx, "receiving message for ingest queue", slog.String("error", err.Error()))
 				time.Sleep(time.Millisecond * 10)
+				cancel()
 				continue
 			}
 
-			span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Ingester Worker Start"))
+			span := startSentryTransaction(ctx, "ingester.process_submission", "task.ingester.process")
 			ctx = span.Context()
 
 			// Process the message here.
@@ -62,6 +63,7 @@ func (w *IngesterWorker) Start() error {
 					message.Ack()
 				}
 				span.Finish()
+				cancel()
 				continue
 			}
 
@@ -86,6 +88,7 @@ func (w *IngesterWorker) Start() error {
 
 			message.Ack()
 			span.Finish()
+			cancel()
 		}
 	}
 }
@@ -118,7 +121,8 @@ func (w *IngesterWorker) runPeriodicAggregation() {
 func (w *IngesterWorker) aggregateAllMonitors() {
 	const aggregationLookbackDays = 30
 	ctx := sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone())
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Aggregate All Monitors"))
+	aggregationStartedAt := time.Now()
+	span := startSentryTransaction(ctx, "ingester.aggregate_all", "task.ingester.aggregate")
 	ctx = span.Context()
 	defer span.Finish()
 
@@ -167,6 +171,7 @@ func (w *IngesterWorker) aggregateAllMonitors() {
 	}
 
 	slog.InfoContext(ctx, "starting aggregation", slog.Int("task_count", len(tasks)))
+	sentryGaugeMetric(ctx, "eyrie.ingester.aggregation.tasks", float64(len(tasks)))
 
 	// Aggregate each monitor/date combination
 	for _, task := range tasks {
@@ -183,11 +188,12 @@ func (w *IngesterWorker) aggregateAllMonitors() {
 		}
 	}
 
+	sentryDistributionMetric(ctx, "eyrie.ingester.aggregation.duration", float64(time.Since(aggregationStartedAt).Milliseconds()), sentry.UnitMillisecond)
 	slog.InfoContext(ctx, "aggregation completed", slog.Int("task_count", len(tasks)))
 }
 
 func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission CheckerSubmissionRequest, region string) error {
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Ingest Monitor Historical"))
+	span := startSentrySpan(ctx, "db.write", "Ingest Monitor Historical")
 	ctx = span.Context()
 	defer span.Finish()
 
@@ -275,11 +281,21 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 		return fmt.Errorf("inserting monitor historical: %w", err)
 	}
 
+	sentryCountMetric(ctx, "eyrie.monitor.submissions.ingested", 1,
+		attribute.String("probe_type", probeType),
+		attribute.String("region", region),
+	)
+	if submission.LatencyMs > 0 {
+		sentryDistributionMetric(ctx, "eyrie.monitor.submissions.ingested_latency", float64(submission.LatencyMs), sentry.UnitMillisecond,
+			attribute.String("probe_type", probeType),
+			attribute.String("region", region),
+		)
+	}
 	return nil
 }
 
 func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, monitorID string, date time.Time) error {
-	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Aggregate Daily Monitor Historical"))
+	span := startSentrySpan(ctx, "db.aggregate", "Aggregate Daily Monitor Historical")
 	ctx = span.Context()
 	defer span.Finish()
 

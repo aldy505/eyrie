@@ -16,8 +16,27 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/ClickHouse/clickhouse-go/v2"
+	_ "github.com/denisenkom/go-mssqldb"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/guregu/null/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+type sqlPinger interface {
+	PingContext(ctx context.Context) error
+	Close() error
+}
+
+var (
+	openSQLDatabase = func(driverName string, dsn string) (sqlPinger, error) {
+		db, err := sql.Open(driverName, dsn)
+		if err != nil {
+			return nil, err
+		}
+		return db, nil
+	}
+	pingCommandContext = exec.CommandContext
 )
 
 func (c *Checker) probeMonitor(ctx context.Context, monitor Monitor) CheckerSubmissionRequest {
@@ -30,6 +49,12 @@ func (c *Checker) probeMonitor(ctx context.Context, monitor Monitor) CheckerSubm
 		return c.probeRedis(ctx, monitor)
 	case MonitorTypePostgres:
 		return c.probePostgres(ctx, monitor)
+	case MonitorTypeMySQL:
+		return c.probeMySQL(ctx, monitor)
+	case MonitorTypeMSSQL:
+		return c.probeMSSQL(ctx, monitor)
+	case MonitorTypeClickHouse:
+		return c.probeClickHouse(ctx, monitor)
 	default:
 		return c.probeHTTP(ctx, monitor)
 	}
@@ -181,7 +206,7 @@ func (c *Checker) probeICMP(ctx context.Context, monitor Monitor) CheckerSubmiss
 	timeout := monitor.EffectiveTimeout(5 * time.Second)
 	count := max(monitor.ICMP.Count, 1)
 	waitSeconds := max(int(timeout/time.Second), 1)
-	command := exec.CommandContext(ctx, "ping", "-c", strconv.Itoa(count), "-W", strconv.Itoa(waitSeconds), monitor.ICMP.Host)
+	command := pingCommandContext(ctx, "ping", "-c", strconv.Itoa(count), "-W", strconv.Itoa(waitSeconds), monitor.ICMP.Host)
 	output, err := command.CombinedOutput()
 
 	submission := CheckerSubmissionRequest{
@@ -259,6 +284,22 @@ func (c *Checker) probeRedis(ctx context.Context, monitor Monitor) CheckerSubmis
 }
 
 func (c *Checker) probePostgres(ctx context.Context, monitor Monitor) CheckerSubmissionRequest {
+	return c.probeDatabase(ctx, monitor, "pgx", monitor.Postgres.DSN)
+}
+
+func (c *Checker) probeMySQL(ctx context.Context, monitor Monitor) CheckerSubmissionRequest {
+	return c.probeDatabase(ctx, monitor, "mysql", monitor.MySQL.DSN)
+}
+
+func (c *Checker) probeMSSQL(ctx context.Context, monitor Monitor) CheckerSubmissionRequest {
+	return c.probeDatabase(ctx, monitor, "sqlserver", monitor.MSSQL.DSN)
+}
+
+func (c *Checker) probeClickHouse(ctx context.Context, monitor Monitor) CheckerSubmissionRequest {
+	return c.probeDatabase(ctx, monitor, "clickhouse", monitor.ClickHouse.DSN)
+}
+
+func (c *Checker) probeDatabase(ctx context.Context, monitor Monitor, driverName string, dsn string) CheckerSubmissionRequest {
 	start := time.Now()
 	timeout := monitor.EffectiveTimeout(10 * time.Second)
 	submission := CheckerSubmissionRequest{
@@ -270,7 +311,7 @@ func (c *Checker) probePostgres(ctx context.Context, monitor Monitor) CheckerSub
 	pingCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	db, err := sql.Open("pgx", monitor.Postgres.DSN)
+	db, err := openSQLDatabase(driverName, dsn)
 	if err != nil {
 		submission.LatencyMs = time.Since(start).Milliseconds()
 		submission.FailureReason = null.StringFrom(err.Error())
