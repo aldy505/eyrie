@@ -8,6 +8,7 @@ import {
   Globe2,
   MapPin,
   Radar,
+  RefreshCw,
   Server,
   ShieldAlert,
   ShieldCheck,
@@ -367,13 +368,13 @@ function RegionList({
 }) {
   const affected = new Set(incident?.affected_regions ?? []);
   return (
-    <div className="grid gap-3 md:grid-cols-2">
+    <div className="flex gap-3 overflow-x-auto pb-1">
       {regions.map((region) => {
         const isAffected = affected.has(region.region);
         return (
           <div
             key={region.region}
-            className={`rounded-2xl border px-4 py-3 ${isAffected ? "border-rose-400/30 bg-rose-500/10" : "border-white/10 bg-white/5"}`}
+            className={`min-w-[180px] shrink-0 rounded-2xl border px-4 py-3 ${isAffected ? "border-rose-400/30 bg-rose-500/10" : "border-white/10 bg-white/5"}`}
           >
             <div className="flex items-center justify-between gap-4">
               <div>
@@ -404,7 +405,7 @@ function MonitorCard({
   incidents: Map<string, Incident>;
   regionMap: Record<string, RegionData["monitors"]>;
 }) {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
   const children = monitor.monitors;
   const isCollapsibleGroup = monitor.type === "group" && children.length > 1;
   const childIncidents = children
@@ -459,19 +460,22 @@ function MonitorCard({
               <p className="max-w-3xl text-sm text-slate-300">{monitor.description}</p>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-3 text-sm text-slate-300 md:grid-cols-3">
-            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Latency</p>
-              <p className="mt-2 text-lg font-semibold text-white">{averageLatency} ms</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Monitors</p>
-              <p className="mt-2 text-lg font-semibold text-white">{children.length}</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Scope</p>
-              <p className="mt-2 text-lg font-semibold text-white">{formatScope(scope)}</p>
-            </div>
+          <div className="flex flex-wrap items-center gap-4 text-sm text-slate-400">
+            <span className="inline-flex items-center gap-1.5">
+              <Activity className="h-3.5 w-3.5 text-emerald-300" />
+              <span className="font-medium text-white">{averageLatency} ms</span>
+            </span>
+            <span className="text-white/20">•</span>
+            <span className="inline-flex items-center gap-1.5">
+              <Server className="h-3.5 w-3.5 text-sky-300" />
+              <span className="font-medium text-white">{children.length}</span>
+              <span>monitors</span>
+            </span>
+            <span className="text-white/20">•</span>
+            <span className="inline-flex items-center gap-1.5">
+              <Globe2 className="h-3.5 w-3.5 text-fuchsia-300" />
+              <span className="font-medium text-white">{formatScope(scope)}</span>
+            </span>
           </div>
         </div>
 
@@ -542,7 +546,7 @@ function MonitorCard({
                     </div>
                   </div>
 
-                  <div className="mt-5 grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+                  <div className="mt-5 flex flex-col gap-5">
                     <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
                       <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
                         Availability trend
@@ -572,8 +576,11 @@ function App() {
   const [incidents, setIncidents] = useState<IncidentsData | null>(null);
   const [regionMap, setRegionMap] = useState<Record<string, RegionData["monitors"]>>({});
   const [error, setError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  useEffect(() => {
+  function loadData() {
+    setIsRefreshing(true);
+    setError(null);
     Promise.all([
       fetch(`${BASE_URL}/uptime-data`).then((response) => response.json()),
       fetch(`${BASE_URL}/config`).then((response) => response.json()),
@@ -612,7 +619,14 @@ function App() {
       })
       .catch((caught) => {
         setError(caught instanceof Error ? caught.message : "Failed to load status data");
+      })
+      .finally(() => {
+        setIsRefreshing(false);
       });
+  }
+
+  useEffect(() => {
+    loadData();
   }, []);
 
   const incidentById = useMemo(() => {
@@ -667,7 +681,18 @@ function App() {
             </div>
             {metadata?.show_last_updated && (
               <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm text-slate-300">
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Last updated</p>
+                <div className="flex items-center justify-between gap-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Last updated</p>
+                  <button
+                    onClick={loadData}
+                    disabled={isRefreshing}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+                    title="Refresh data"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin" : ""}`} />
+                    Refresh
+                  </button>
+                </div>
                 <p className="mt-2 font-medium text-white">
                   {data?.last_updated.toLocaleString(undefined, {
                     dateStyle: "long",
