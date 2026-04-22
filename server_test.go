@@ -191,7 +191,7 @@ func TestServer_FetchFromAggregateMonitorHistoricalUsesExpectedStatusCodes(t *te
 				ID:                  monitorID,
 				Name:                "HTTP Semantics Monitor",
 				Description:         null.StringFrom("HTTP semantics test"),
-				ExpectedStatusCodes: []int{200},
+				ExpectedStatusCodes: []int{418},
 			},
 		},
 	}
@@ -208,7 +208,7 @@ func TestServer_FetchFromAggregateMonitorHistoricalUsesExpectedStatusCodes(t *te
 			MonitorID:  monitorID,
 			Success:    false,
 			LatencyMs:  120,
-			StatusCode: 200,
+			StatusCode: 418,
 			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
 			Timings:    CheckerTraceTimings{},
 		}
@@ -242,7 +242,7 @@ func TestServer_FetchFromAggregateMonitorHistoricalUsesExpectedStatusCodes(t *te
 
 	for _, downtime := range result.DailyDowntimes {
 		if downtime.DurationMinutes != 0 {
-			t.Fatalf("expected zero downtime when status codes are healthy, got %d", downtime.DurationMinutes)
+			t.Fatalf("expected zero downtime when custom expected status codes are healthy, got %d", downtime.DurationMinutes)
 		}
 	}
 }
