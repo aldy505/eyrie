@@ -152,7 +152,8 @@ func (w *ProcessorWorker) findMonitor(monitorID string) (Monitor, bool) {
 }
 
 // buildFailureReasonsBreakdown aggregates failure reasons by category across failed regions
-// from the most recent bucket with failures.
+// from the most recent bucket with failures. Only includes regions that are marked as failed
+// in the bucket (i.e., below the per-region failure threshold).
 func (w *ProcessorWorker) buildFailureReasonsBreakdown(buckets map[time.Time]SubmissionBucket, submissions []MonitorHistorical, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) map[string][]string {
 	breakdown := make(map[string][]string)
 
@@ -163,14 +164,25 @@ func (w *ProcessorWorker) buildFailureReasonsBreakdown(buckets map[time.Time]Sub
 			continue
 		}
 
-		// Get all failures from this time bucket
+		// Build set of regions marked as failed in this bucket
+		failedRegions := make(map[string]bool)
+		for region, success := range bucket.Regions {
+			if !success {
+				failedRegions[region] = true
+			}
+		}
+
+		// Get all failures from this time bucket with inclusive start, exclusive end
 		bucketStart := t
 		bucketEnd := t.Add(minuteInterval)
 		var bucketFailures []MonitorHistorical
 
 		for _, submission := range submissions {
-			if !submission.Success && submission.CreatedAt.After(bucketStart) && submission.CreatedAt.Before(bucketEnd) {
-				bucketFailures = append(bucketFailures, submission)
+			if !submission.Success && !submission.CreatedAt.Before(bucketStart) && submission.CreatedAt.Before(bucketEnd) {
+				// Only include submissions from regions marked as failed
+				if failedRegions[submission.Region] {
+					bucketFailures = append(bucketFailures, submission)
+				}
 			}
 		}
 

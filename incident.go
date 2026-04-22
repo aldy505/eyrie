@@ -55,7 +55,32 @@ func (e IncidentEvaluation) Equal(other IncidentEvaluation) bool {
 	right := append([]string(nil), other.AffectedRegions...)
 	slices.Sort(left)
 	slices.Sort(right)
-	return slices.Equal(left, right)
+	if !slices.Equal(left, right) {
+		return false
+	}
+
+	// Compare FailureReasonsBreakdown with deterministic ordering
+	if len(e.FailureReasonsBreakdown) != len(other.FailureReasonsBreakdown) {
+		return false
+	}
+	for category, regions := range e.FailureReasonsBreakdown {
+		otherRegions, ok := other.FailureReasonsBreakdown[category]
+		if !ok {
+			return false
+		}
+		if len(regions) != len(otherRegions) {
+			return false
+		}
+		// Sort for comparison since map values can be in different order
+		sortedLeft := append([]string(nil), regions...)
+		sortedRight := append([]string(nil), otherRegions...)
+		slices.Sort(sortedLeft)
+		slices.Sort(sortedRight)
+		if !slices.Equal(sortedLeft, sortedRight) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e IncidentEvaluation) RegionsJSON() string {
