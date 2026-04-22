@@ -99,6 +99,76 @@ func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 	}
 }
 
+func TestIngesterWorker_IngestMonitorHistoricalUsesMonitorSuccessSemantics(t *testing.T) {
+	monitorID := "test-ingest-monitor-http-semantics"
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:         db,
+		subscriber: nil,
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					ExpectedStatusCodes: []int{418},
+				},
+			},
+		},
+		shutdown: make(chan struct{}),
+	}
+
+	submission := CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		ProbeType:  string(MonitorTypeHTTP),
+		Success:    false,
+		LatencyMs:  100,
+		StatusCode: 418,
+		Timestamp:  time.Now().UTC(),
+		Timings:    CheckerTraceTimings{},
+	}
+
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+		t.Fatalf("failed to ingest monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for verification: %v", err)
+	}
+	defer conn.Close()
+
+	var success bool
+	err = conn.QueryRowContext(ctx, `
+		SELECT success
+		FROM monitor_historical
+		WHERE monitor_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, monitorID).Scan(&success)
+	if err != nil {
+		t.Fatalf("failed to query monitor_historical success: %v", err)
+	}
+
+	if !success {
+		t.Fatalf("expected persisted success to honor custom expected status codes")
+	}
+}
+
 func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 	monitorID := "test-aggregate-monitor"
 	testDate := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)

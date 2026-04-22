@@ -58,6 +58,18 @@ func buildSuccessCountExpression(monitorConfig Monitor) (string, []any) {
 	}
 }
 
+func (w *IngesterWorker) determineHistoricalSuccess(monitorID string, probeType string, submission CheckerSubmissionRequest) bool {
+	if monitorConfig, found := w.findMonitorConfig(monitorID); found {
+		return monitorConfig.IsSuccessfulStatus(submission.StatusCode, submission.Success)
+	}
+
+	if !submission.Success && (probeType == string(MonitorTypeHTTP) || probeType == "") {
+		return submission.StatusCode >= 200 && submission.StatusCode < 400
+	}
+
+	return submission.Success
+}
+
 // Start begins the ingestion process, listening for new messages.
 // It is a blocking call.
 func (w *IngesterWorker) Start() error {
@@ -248,10 +260,7 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 	if probeType == "" {
 		probeType = string(MonitorTypeHTTP)
 	}
-	success := submission.Success
-	if !success && (probeType == string(MonitorTypeHTTP) || probeType == "") {
-		success = submission.StatusCode >= 200 && submission.StatusCode < 400
-	}
+	success := w.determineHistoricalSuccess(submission.MonitorID, probeType, submission)
 
 	// Insert raw monitor historical data
 	_, err = conn.ExecContext(ctx, `
