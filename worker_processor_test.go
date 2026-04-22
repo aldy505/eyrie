@@ -1278,3 +1278,259 @@ func TestProcessorWorker_AnalyzeSubmissions(t *testing.T) {
 		}
 	})
 }
+
+func TestProcessorWorker_BuildFailureReasonsBreakdown(t *testing.T) {
+	t.Run("Empty_buckets_returns_empty_breakdown", func(t *testing.T) {
+		worker := &ProcessorWorker{datasetConfig: defaultTestDatasetConfig()}
+		buckets := make(map[time.Time]SubmissionBucket)
+		submissions := []MonitorHistorical{}
+
+		result := worker.buildFailureReasonsBreakdown(buckets, submissions, time.Now().UTC(), time.Now().UTC().Add(-1*time.Hour), time.Minute)
+
+		if len(result) != 0 {
+			t.Errorf("Expected empty breakdown, got %v", result)
+		}
+	})
+
+	t.Run("Only_includes_regions_marked_as_failed", func(t *testing.T) {
+		worker := &ProcessorWorker{datasetConfig: defaultTestDatasetConfig()}
+		baseTime := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+
+		// Create bucket with us-east-1 failed, eu-west-1 healthy
+		buckets := map[time.Time]SubmissionBucket{
+			baseTime: {
+				TotalCount:   2,
+				FailureCount: 1,
+				Regions: map[string]bool{
+					"us-east-1": false, // failed
+					"eu-west-1": true,  // healthy
+				},
+			},
+		}
+
+		// Create submissions: timeout from us-east-1, timeout from eu-west-1
+		submissions := []MonitorHistorical{
+			{
+				Success:      false,
+				CreatedAt:    baseTime.Add(30 * time.Second),
+				Region:       "us-east-1",
+				FailureReason: null.StringFrom("connection timeout"),
+			},
+			{
+				Success:      false,
+				CreatedAt:    baseTime.Add(45 * time.Second),
+				Region:       "eu-west-1",
+				FailureReason: null.StringFrom("connection timeout"),
+			},
+		}
+
+		result := worker.buildFailureReasonsBreakdown(buckets, submissions, baseTime, baseTime.Add(-1*time.Hour), time.Minute)
+
+		// Only us-east-1 should be in breakdown (eu-west-1 is marked healthy)
+		if len(result) != 1 {
+			t.Errorf("Expected 1 category, got %d: %v", len(result), result)
+		}
+		if regions, ok := result["timeout"]; ok {
+			if len(regions) != 1 || regions[0] != "us-east-1" {
+				t.Errorf("Expected only us-east-1 in timeout category, got %v", regions)
+			}
+		} else {
+			t.Errorf("Expected timeout category in breakdown, got %v", result)
+		}
+	})
+
+	t.Run("Boundary_timestamps_inclusive_start_exclusive_end", func(t *testing.T) {
+		worker := &ProcessorWorker{datasetConfig: defaultTestDatasetConfig()}
+		baseTime := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+
+		buckets := map[time.Time]SubmissionBucket{
+			baseTime: {
+				TotalCount:   1,
+				FailureCount: 1,
+				Regions:      map[string]bool{"us-east-1": false},
+			},
+		}
+
+		// Submission exactly at bucketStart should be included (>= bucketStart)
+		// Submission at bucketEnd should be excluded (< bucketEnd)
+		submissions := []MonitorHistorical{
+			{
+				Success:       false,
+				CreatedAt:     baseTime, // exactly at start - should be included
+				Region:        "us-east-1",
+				FailureReason: null.StringFrom("timeout"),
+			},
+			{
+				Success:       false,
+				CreatedAt:     baseTime.Add(1 * time.Minute), // exactly at end - should be excluded
+				Region:        "us-east-1",
+				FailureReason: null.StringFrom("timeout"),
+			},
+		}
+
+		result := worker.buildFailureReasonsBreakdown(buckets, submissions, baseTime, baseTime.Add(-1*time.Hour), time.Minute)
+
+		// Should only have 1 submission (the one at boundary start)
+		if len(result) != 1 {
+			t.Errorf("Expected 1 category, got %d: %v", len(result), result)
+		}
+		if regions, ok := result["timeout"]; ok {
+			if len(regions) != 1 {
+				t.Errorf("Expected 1 region in timeout category, got %d: %v", len(regions), regions)
+			}
+		}
+	})
+
+	t.Run("Multiple_failure_categories_aggregated", func(t *testing.T) {
+		worker := &ProcessorWorker{datasetConfig: defaultTestDatasetConfig()}
+		baseTime := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+
+		buckets := map[time.Time]SubmissionBucket{
+			baseTime: {
+				TotalCount:   2,
+				FailureCount: 2,
+				Regions: map[string]bool{
+					"us-east-1": false,
+					"eu-west-1": false,
+				},
+			},
+		}
+
+		submissions := []MonitorHistorical{
+			{
+				Success:       false,
+				CreatedAt:     baseTime.Add(10 * time.Second),
+				Region:        "us-east-1",
+				FailureReason: null.StringFrom("connection timeout"),
+			},
+			{
+				Success:       false,
+				CreatedAt:     baseTime.Add(20 * time.Second),
+				Region:        "eu-west-1",
+				FailureReason: null.StringFrom("TLS certificate error"),
+			},
+		}
+
+		result := worker.buildFailureReasonsBreakdown(buckets, submissions, baseTime, baseTime.Add(-1*time.Hour), time.Minute)
+
+		if len(result) != 2 {
+			t.Errorf("Expected 2 categories, got %d: %v", len(result), result)
+		}
+
+		if timeoutRegions, ok := result["timeout"]; ok && len(timeoutRegions) == 1 && timeoutRegions[0] == "us-east-1" {
+			// Good
+		} else {
+			t.Errorf("Expected timeout in us-east-1, got %v", result["timeout"])
+		}
+
+		if tlsRegions, ok := result["tls_error"]; ok && len(tlsRegions) == 1 && tlsRegions[0] == "eu-west-1" {
+			// Good
+		} else {
+			t.Errorf("Expected tls_error in eu-west-1, got %v", result["tls_error"])
+		}
+	})
+
+	t.Run("Same_failure_category_multiple_regions", func(t *testing.T) {
+		worker := &ProcessorWorker{datasetConfig: defaultTestDatasetConfig()}
+		baseTime := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+
+		buckets := map[time.Time]SubmissionBucket{
+			baseTime: {
+				TotalCount:   3,
+				FailureCount: 3,
+				Regions: map[string]bool{
+					"us-east-1": false,
+					"eu-west-1": false,
+					"ap-south-1": false,
+				},
+			},
+		}
+
+		submissions := []MonitorHistorical{
+			{
+				Success:       false,
+				CreatedAt:     baseTime.Add(10 * time.Second),
+				Region:        "us-east-1",
+				FailureReason: null.StringFrom("read timeout"),
+			},
+			{
+				Success:       false,
+				CreatedAt:     baseTime.Add(20 * time.Second),
+				Region:        "eu-west-1",
+				FailureReason: null.StringFrom("dial timeout"),
+			},
+			{
+				Success:       false,
+				CreatedAt:     baseTime.Add(30 * time.Second),
+				Region:        "ap-south-1",
+				FailureReason: null.StringFrom("i/o timeout"),
+			},
+		}
+
+		result := worker.buildFailureReasonsBreakdown(buckets, submissions, baseTime, baseTime.Add(-1*time.Hour), time.Minute)
+
+		if len(result) != 1 {
+			t.Errorf("Expected 1 category, got %d: %v", len(result), result)
+		}
+
+		if regions, ok := result["timeout"]; ok {
+			if len(regions) != 3 {
+				t.Errorf("Expected 3 regions in timeout, got %d: %v", len(regions), regions)
+			}
+			// Verify sorted
+			if regions[0] != "ap-south-1" || regions[1] != "eu-west-1" || regions[2] != "us-east-1" {
+				t.Errorf("Expected sorted regions, got %v", regions)
+			}
+		} else {
+			t.Errorf("Expected timeout category, got %v", result)
+		}
+	})
+
+	t.Run("Uses_most_recent_bucket_with_failures", func(t *testing.T) {
+		worker := &ProcessorWorker{datasetConfig: defaultTestDatasetConfig()}
+		baseTime := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+		oldTime := baseTime.Add(-5 * time.Minute)
+
+		buckets := map[time.Time]SubmissionBucket{
+			oldTime: {
+				TotalCount:   1,
+				FailureCount: 1,
+				Regions:      map[string]bool{"us-east-1": false},
+			},
+			baseTime: {
+				TotalCount:   1,
+				FailureCount: 1,
+				Regions:      map[string]bool{"eu-west-1": false},
+			},
+		}
+
+		submissions := []MonitorHistorical{
+			{
+				Success:       false,
+				CreatedAt:     oldTime.Add(10 * time.Second),
+				Region:        "us-east-1",
+				FailureReason: null.StringFrom("timeout"),
+			},
+			{
+				Success:       false,
+				CreatedAt:     baseTime.Add(10 * time.Second),
+				Region:        "eu-west-1",
+				FailureReason: null.StringFrom("connection refused"),
+			},
+		}
+
+		result := worker.buildFailureReasonsBreakdown(buckets, submissions, baseTime, oldTime.Add(-1*time.Hour), time.Minute)
+
+		// Should only have data from most recent bucket (baseTime)
+		if len(result) != 1 {
+			t.Errorf("Expected 1 category, got %d: %v", len(result), result)
+		}
+		if regions, ok := result["connection_refused"]; ok {
+			if len(regions) != 1 || regions[0] != "eu-west-1" {
+				t.Errorf("Expected only eu-west-1 in connection_refused, got %v", regions)
+			}
+		} else {
+			t.Errorf("Expected connection_refused category, got %v", result)
+		}
+	})
+}

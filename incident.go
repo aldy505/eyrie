@@ -36,14 +36,15 @@ const (
 )
 
 type IncidentEvaluation struct {
-	Status          string
-	Scope           string
-	Reason          string
-	AffectedRegions []string
+	Status                  string
+	Scope                   string
+	Reason                  string
+	AffectedRegions         []string
+	FailureReasonsBreakdown map[string][]string // category -> list of regions
 }
 
 func HealthyIncidentEvaluation() IncidentEvaluation {
-	return IncidentEvaluation{Status: MonitorStatusHealthy, Scope: MonitorScopeHealthy, AffectedRegions: []string{}}
+	return IncidentEvaluation{Status: MonitorStatusHealthy, Scope: MonitorScopeHealthy, AffectedRegions: []string{}, FailureReasonsBreakdown: make(map[string][]string)}
 }
 
 func (e IncidentEvaluation) Equal(other IncidentEvaluation) bool {
@@ -54,7 +55,32 @@ func (e IncidentEvaluation) Equal(other IncidentEvaluation) bool {
 	right := append([]string(nil), other.AffectedRegions...)
 	slices.Sort(left)
 	slices.Sort(right)
-	return slices.Equal(left, right)
+	if !slices.Equal(left, right) {
+		return false
+	}
+
+	// Compare FailureReasonsBreakdown with deterministic ordering
+	if len(e.FailureReasonsBreakdown) != len(other.FailureReasonsBreakdown) {
+		return false
+	}
+	for category, regions := range e.FailureReasonsBreakdown {
+		otherRegions, ok := other.FailureReasonsBreakdown[category]
+		if !ok {
+			return false
+		}
+		if len(regions) != len(otherRegions) {
+			return false
+		}
+		// Sort for comparison since map values can be in different order
+		sortedLeft := append([]string(nil), regions...)
+		sortedRight := append([]string(nil), otherRegions...)
+		slices.Sort(sortedLeft)
+		slices.Sort(sortedRight)
+		if !slices.Equal(sortedLeft, sortedRight) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e IncidentEvaluation) RegionsJSON() string {
@@ -110,4 +136,27 @@ func (e IncidentEvaluation) ProgrammaticTitle(monitor Monitor) string {
 	default:
 		return monitor.Name + " is healthy"
 	}
+}
+
+func (e IncidentEvaluation) FailureReasonsJSON() string {
+	if len(e.FailureReasonsBreakdown) == 0 {
+		return "{}"
+	}
+	body, err := json.Marshal(e.FailureReasonsBreakdown)
+	if err != nil {
+		return "{}"
+	}
+	return string(body)
+}
+
+func ParseFailureReasonsJSON(raw string) map[string][]string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
+		return make(map[string][]string)
+	}
+	var breakdown map[string][]string
+	if err := json.Unmarshal([]byte(trimmed), &breakdown); err != nil || breakdown == nil {
+		return make(map[string][]string)
+	}
+	return breakdown
 }

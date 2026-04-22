@@ -90,7 +90,7 @@ func (w *ProcessorWorker) Start() error {
 			}
 
 			buckets, earliestTime, latestTime := w.groupSubmissionByMinute(historicalSubmissions, time.Minute, monitor)
-			evaluation := w.evaluateLatestIncident(buckets, latestTime, earliestTime, time.Minute)
+			evaluation := w.evaluateLatestIncident(buckets, historicalSubmissions, latestTime, earliestTime, time.Minute)
 
 			previous, err := w.loadIncidentState(ctx, request.MonitorID)
 			if err != nil {
@@ -149,6 +149,66 @@ func (w *ProcessorWorker) findMonitor(monitorID string) (Monitor, bool) {
 		}
 	}
 	return Monitor{}, false
+}
+
+// buildFailureReasonsBreakdown aggregates failure reasons by category across failed regions
+// from the most recent bucket with failures. Only includes regions that are marked as failed
+// in the bucket (i.e., below the per-region failure threshold).
+func (w *ProcessorWorker) buildFailureReasonsBreakdown(buckets map[time.Time]SubmissionBucket, submissions []MonitorHistorical, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) map[string][]string {
+	breakdown := make(map[string][]string)
+
+	// Find the most recent bucket with failures
+	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
+		bucket, ok := buckets[t]
+		if !ok || bucket.FailureCount == 0 {
+			continue
+		}
+
+		// Build set of regions marked as failed in this bucket
+		failedRegions := make(map[string]bool)
+		for region, success := range bucket.Regions {
+			if !success {
+				failedRegions[region] = true
+			}
+		}
+
+		// Get all failures from this time bucket with inclusive start, exclusive end
+		bucketStart := t
+		bucketEnd := t.Add(minuteInterval)
+		var bucketFailures []MonitorHistorical
+
+		for _, submission := range submissions {
+			if !submission.Success && !submission.CreatedAt.Before(bucketStart) && submission.CreatedAt.Before(bucketEnd) {
+				// Only include submissions from regions marked as failed
+				if failedRegions[submission.Region] {
+					bucketFailures = append(bucketFailures, submission)
+				}
+			}
+		}
+
+		// Aggregate by category
+		categoryRegions := make(map[string]map[string]bool) // category -> set of regions
+		for _, failure := range bucketFailures {
+			category := CategorizeFailureReason(failure.FailureReason.String)
+			if categoryRegions[category] == nil {
+				categoryRegions[category] = make(map[string]bool)
+			}
+			categoryRegions[category][failure.Region] = true
+		}
+
+		// Convert to sorted lists
+		for category, regions := range categoryRegions {
+			regionList := make([]string, 0, len(regions))
+			for region := range regions {
+				regionList = append(regionList, region)
+			}
+			slices.Sort(regionList)
+			breakdown[category] = regionList
+		}
+		break
+	}
+
+	return breakdown
 }
 
 func (w *ProcessorWorker) lookback(ctx context.Context, monitorID string, since time.Time) ([]MonitorHistorical, error) {
@@ -255,7 +315,7 @@ func (w *ProcessorWorker) groupSubmissionByMinute(submissions []MonitorHistorica
 	return buckets, earliestTime, latestTime
 }
 
-func (w *ProcessorWorker) evaluateLatestIncident(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) IncidentEvaluation {
+func (w *ProcessorWorker) evaluateLatestIncident(buckets map[time.Time]SubmissionBucket, submissions []MonitorHistorical, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) IncidentEvaluation {
 	if len(buckets) == 0 || earliestTime.After(latestTime) || minuteInterval <= 0 {
 		return HealthyIncidentEvaluation()
 	}
@@ -278,6 +338,9 @@ func (w *ProcessorWorker) evaluateLatestIncident(buckets map[time.Time]Submissio
 			return HealthyIncidentEvaluation()
 		}
 
+		// Build failure reasons breakdown for this incident
+		reasonsBreakdown := w.buildFailureReasonsBreakdown(buckets, submissions, latestTime, earliestTime, minuteInterval)
+
 		failureRate := float64(len(failedRegions)) / float64(bucket.TotalCount)
 		switch {
 		case bucket.TotalCount == len(failedRegions):
@@ -286,24 +349,27 @@ func (w *ProcessorWorker) evaluateLatestIncident(buckets map[time.Time]Submissio
 				scope = MonitorScopeGlobal
 			}
 			return IncidentEvaluation{
-				Status:          MonitorStatusDown,
-				Scope:           scope,
-				Reason:          fmt.Sprintf("Probe failures detected in all reporting regions (%s)", strings.Join(failedRegions, ", ")),
-				AffectedRegions: failedRegions,
+				Status:                  MonitorStatusDown,
+				Scope:                   scope,
+				Reason:                  fmt.Sprintf("Probe failures detected in all reporting regions (%s)", strings.Join(failedRegions, ", ")),
+				AffectedRegions:         failedRegions,
+				FailureReasonsBreakdown: reasonsBreakdown,
 			}
 		case bucket.TotalCount > 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0:
 			return IncidentEvaluation{
-				Status:          MonitorStatusDown,
-				Scope:           MonitorScopeGlobal,
-				Reason:          fmt.Sprintf("Multi-region outage detected across %d/%d regions (%s)", len(failedRegions), bucket.TotalCount, strings.Join(failedRegions, ", ")),
-				AffectedRegions: failedRegions,
+				Status:                  MonitorStatusDown,
+				Scope:                   MonitorScopeGlobal,
+				Reason:                  fmt.Sprintf("Multi-region outage detected across %d/%d regions (%s)", len(failedRegions), bucket.TotalCount, strings.Join(failedRegions, ", ")),
+				AffectedRegions:         failedRegions,
+				FailureReasonsBreakdown: reasonsBreakdown,
 			}
 		default:
 			return IncidentEvaluation{
-				Status:          MonitorStatusDegraded,
-				Scope:           MonitorScopeLocal,
-				Reason:          fmt.Sprintf("Regional degradation detected in %s", strings.Join(failedRegions, ", ")),
-				AffectedRegions: failedRegions,
+				Status:                  MonitorStatusDegraded,
+				Scope:                   MonitorScopeLocal,
+				Reason:                  fmt.Sprintf("Regional degradation detected in %s", strings.Join(failedRegions, ", ")),
+				AffectedRegions:         failedRegions,
+				FailureReasonsBreakdown: reasonsBreakdown,
 			}
 		}
 	}
@@ -412,11 +478,12 @@ func (w *ProcessorWorker) loadIncidentState(ctx context.Context, monitorID strin
 	var scope string
 	var regions string
 	var reason string
+	var failureReasonsJson string
 	err = conn.QueryRowContext(ctx, `
-		SELECT status, scope, affected_regions, reason
+		SELECT status, scope, affected_regions, reason, COALESCE(failure_reasons_json, '{}')
 		FROM monitor_incident_state
 		WHERE monitor_id = ?
-	`, monitorID).Scan(&status, &scope, &regions, &reason)
+	`, monitorID).Scan(&status, &scope, &regions, &reason, &failureReasonsJson)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return HealthyIncidentEvaluation(), nil
@@ -425,10 +492,11 @@ func (w *ProcessorWorker) loadIncidentState(ctx context.Context, monitorID strin
 	}
 
 	return IncidentEvaluation{
-		Status:          status,
-		Scope:           scope,
-		Reason:          reason,
-		AffectedRegions: ParseRegionsJSON(regions),
+		Status:                  status,
+		Scope:                   scope,
+		Reason:                  reason,
+		AffectedRegions:         ParseRegionsJSON(regions),
+		FailureReasonsBreakdown: ParseFailureReasonsJSON(failureReasonsJson),
 	}, nil
 }
 
@@ -441,17 +509,18 @@ func (w *ProcessorWorker) storeIncidentState(ctx context.Context, monitorID stri
 
 	now := time.Now().UTC()
 	_, err = conn.ExecContext(ctx, `
-		INSERT INTO monitor_incident_state (monitor_id, status, scope, affected_regions, reason, last_transition_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO monitor_incident_state (monitor_id, status, scope, affected_regions, reason, failure_reasons_json, last_transition_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (monitor_id) DO UPDATE
 		SET
 			status = EXCLUDED.status,
 			scope = EXCLUDED.scope,
 			affected_regions = EXCLUDED.affected_regions,
 			reason = EXCLUDED.reason,
+			failure_reasons_json = EXCLUDED.failure_reasons_json,
 			last_transition_at = EXCLUDED.last_transition_at,
 			updated_at = EXCLUDED.updated_at
-	`, monitorID, evaluation.Status, evaluation.Scope, evaluation.RegionsJSON(), evaluation.Reason, now, now)
+	`, monitorID, evaluation.Status, evaluation.Scope, evaluation.RegionsJSON(), evaluation.Reason, evaluation.FailureReasonsJSON(), now, now)
 	if err != nil {
 		return fmt.Errorf("upserting incident state: %w", err)
 	}
@@ -581,10 +650,10 @@ func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monito
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO monitor_incidents (
-			id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, started_at, created_at, updated_at
+			id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, failure_reasons_json, started_at, created_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, incident.ID, incident.MonitorID, incident.Source, incident.LifecycleState, incident.AutoImpact, incident.Impact, incident.AutoTitle, incident.AutoBody, incident.Title, incident.Body, incident.Status, incident.Scope, incident.AffectedRegions, incident.StartedAt, incident.CreatedAt, incident.UpdatedAt)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, incident.ID, incident.MonitorID, incident.Source, incident.LifecycleState, incident.AutoImpact, incident.Impact, incident.AutoTitle, incident.AutoBody, incident.Title, incident.Body, incident.Status, incident.Scope, incident.AffectedRegions, evaluation.FailureReasonsJSON(), incident.StartedAt, incident.CreatedAt, incident.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("inserting programmatic incident: %w", err)
 	}
@@ -633,9 +702,10 @@ func (w *ProcessorWorker) updateProgrammaticIncident(ctx context.Context, incide
 			status = ?,
 			scope = ?,
 			affected_regions = ?,
+			failure_reasons_json = ?,
 			updated_at = ?
 		WHERE id = ?
-	`, autoImpact, updatedImpact, autoTitle, autoBody, updatedTitle, updatedBody, lifecycleState, evaluation.Status, evaluation.Scope, affectedRegions, now, incident.ID)
+	`, autoImpact, updatedImpact, autoTitle, autoBody, updatedTitle, updatedBody, lifecycleState, evaluation.Status, evaluation.Scope, affectedRegions, evaluation.FailureReasonsJSON(), now, incident.ID)
 	if err != nil {
 		return fmt.Errorf("updating programmatic incident: %w", err)
 	}
