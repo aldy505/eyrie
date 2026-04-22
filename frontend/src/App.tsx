@@ -60,6 +60,7 @@ const incidentsSchema = z.object({
       scope: z.string(),
       reason: z.string(),
       affected_regions: z.array(z.string()),
+      failure_reasons_breakdown: z.record(z.string(), z.array(z.string())).optional(),
       last_transition_at: z.coerce.date().nullable().catch(null),
       updated_at: z.coerce.date().nullable().catch(null),
     }),
@@ -167,6 +168,71 @@ function formatAvailability(availabilityRatio: number) {
   }
 
   return `${percentage.toFixed(2)}%`;
+}
+
+function friendlyFailureReasonName(category: string): string {
+  switch (category) {
+    case "network_unreachable":
+      return "Network Unreachable";
+    case "connection_refused":
+      return "Connection Refused";
+    case "timeout":
+      return "Timeout";
+    case "tls_error":
+      return "TLS/Certificate Error";
+    case "auth_error":
+      return "Authentication Error";
+    case "dns_error":
+      return "DNS Error";
+    case "http_error":
+      return "HTTP Error";
+    case "generic_error":
+      return "Generic Error";
+    default:
+      return category;
+  }
+}
+
+function formatFailureReasonsBreakdown(
+  breakdown: Record<string, string[]> | undefined,
+): string | null {
+  if (!breakdown || Object.keys(breakdown).length === 0) {
+    return null;
+  }
+
+  const parts = Object.entries(breakdown)
+    .map(([category, regions]) => `${friendlyFailureReasonName(category)} (${regions.length} region${regions.length > 1 ? "s" : ""})`)
+    .sort();
+
+  return parts.join(" • ");
+}
+
+function FailureReasonsBreakdown({ incident }: { incident: Incident }) {
+  const breakdown = incident.failure_reasons_breakdown as Record<string, string[]> | undefined;
+  const summaryText = formatFailureReasonsBreakdown(breakdown);
+
+  if (!summaryText || !breakdown) {
+    return null;
+  }
+
+  const categories = Object.entries(breakdown).sort(([a], [b]) => a.localeCompare(b));
+
+  return (
+    <Collapsible className="mt-3 space-y-2">
+      <CollapsibleTrigger className="group flex items-center gap-2 text-sm text-slate-300 hover:text-white transition-colors">
+        <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
+        <span>Failure details: {summaryText}</span>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="ml-6 space-y-2 text-sm text-slate-400">
+        {categories.map(([category, regions]: [string, string[]]) => (
+          <div key={category}>
+            <p className="font-medium text-slate-300">{friendlyFailureReasonName(category)}</p>
+            <p className="ml-2 text-xs">{regions.join(", ")}</p>
+          </div>
+        ))}
+      </CollapsibleContent>
+    </Collapsible>
+  );
 }
 
 function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: Metadata }) {
@@ -539,6 +605,7 @@ function MonitorCard({
                       ) : (
                         <p>All reporting regions are healthy.</p>
                       )}
+                      {incident && <FailureReasonsBreakdown incident={incident} />}
                     </div>
                   </div>
 

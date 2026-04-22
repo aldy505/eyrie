@@ -160,20 +160,21 @@ type UptimeDataByRegionResponse struct {
 }
 
 type MonitorIncidentSummary struct {
-	MonitorID              string    `json:"monitor_id"`
-	Name                   string    `json:"name"`
-	ProbeType              string    `json:"probe_type"`
-	Status                 string    `json:"status"`
-	Scope                  string    `json:"scope"`
-	Reason                 string    `json:"reason"`
-	AffectedRegions        []string  `json:"affected_regions"`
-	LastTransitionAt       time.Time `json:"last_transition_at"`
-	UpdatedAt              time.Time `json:"updated_at"`
-	IncidentID             string    `json:"incident_id,omitempty"`
-	IncidentSource         string    `json:"incident_source,omitempty"`
-	IncidentLifecycleState string    `json:"incident_lifecycle_state,omitempty"`
-	IncidentImpact         string    `json:"incident_impact,omitempty"`
-	IncidentTitle          string    `json:"incident_title,omitempty"`
+	MonitorID                  string              `json:"monitor_id"`
+	Name                       string              `json:"name"`
+	ProbeType                  string              `json:"probe_type"`
+	Status                     string              `json:"status"`
+	Scope                      string              `json:"scope"`
+	Reason                     string              `json:"reason"`
+	AffectedRegions            []string            `json:"affected_regions"`
+	FailureReasonsBreakdown    map[string][]string `json:"failure_reasons_breakdown,omitempty"`
+	LastTransitionAt           time.Time           `json:"last_transition_at"`
+	UpdatedAt                  time.Time           `json:"updated_at"`
+	IncidentID                 string              `json:"incident_id,omitempty"`
+	IncidentSource             string              `json:"incident_source,omitempty"`
+	IncidentLifecycleState     string              `json:"incident_lifecycle_state,omitempty"`
+	IncidentImpact             string              `json:"incident_impact,omitempty"`
+	IncidentTitle              string              `json:"incident_title,omitempty"`
 }
 
 type MonitorIncidentsResponse struct {
@@ -468,15 +469,16 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 		}
 
 		summary := MonitorIncidentSummary{
-			MonitorID:        metadata.ID,
-			Name:             metadata.Name,
-			ProbeType:        string(monitorConfig.EffectiveType()),
-			Status:           state.Status,
-			Scope:            state.Scope,
-			Reason:           state.Reason,
-			AffectedRegions:  ParseRegionsJSON(state.AffectedRegions),
-			LastTransitionAt: state.LastTransitionAt,
-			UpdatedAt:        state.UpdatedAt,
+			MonitorID:               metadata.ID,
+			Name:                    metadata.Name,
+			ProbeType:               string(monitorConfig.EffectiveType()),
+			Status:                  state.Status,
+			Scope:                   state.Scope,
+			Reason:                  state.Reason,
+			AffectedRegions:         ParseRegionsJSON(state.AffectedRegions),
+			FailureReasonsBreakdown: ParseFailureReasonsJSON(state.FailureReasonsJson),
+			LastTransitionAt:        state.LastTransitionAt,
+			UpdatedAt:               state.UpdatedAt,
 		}
 		if activeFound {
 			summary.IncidentID = activeIncident.ID
@@ -563,7 +565,7 @@ func (s *Server) fetchIncidentState(ctx context.Context, monitorID string) (Moni
 
 	var state MonitorIncidentState
 	err = conn.QueryRowContext(ctx, `
-		SELECT monitor_id, status, scope, affected_regions, reason, last_transition_at, updated_at
+		SELECT monitor_id, status, scope, affected_regions, reason, COALESCE(failure_reasons_json, '{}'), last_transition_at, updated_at
 		FROM monitor_incident_state
 		WHERE monitor_id = ?
 	`, monitorID).Scan(
@@ -572,17 +574,19 @@ func (s *Server) fetchIncidentState(ctx context.Context, monitorID string) (Moni
 		&state.Scope,
 		&state.AffectedRegions,
 		&state.Reason,
+		&state.FailureReasonsJson,
 		&state.LastTransitionAt,
 		&state.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return MonitorIncidentState{
-				MonitorID:       monitorID,
-				Status:          MonitorStatusHealthy,
-				Scope:           MonitorScopeHealthy,
-				AffectedRegions: "[]",
-				Reason:          "",
+				MonitorID:          monitorID,
+				Status:             MonitorStatusHealthy,
+				Scope:              MonitorScopeHealthy,
+				AffectedRegions:    "[]",
+				Reason:             "",
+				FailureReasonsJson: "{}",
 			}, nil
 		}
 		return MonitorIncidentState{}, fmt.Errorf("querying incident state: %w", err)

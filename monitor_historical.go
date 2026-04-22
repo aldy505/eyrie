@@ -38,13 +38,14 @@ type MonitorHistoricalDailyAggregate struct {
 }
 
 type MonitorIncidentState struct {
-	MonitorID        string    `db:"monitor_id"`
-	Status           string    `db:"status"`
-	Scope            string    `db:"scope"`
-	AffectedRegions  string    `db:"affected_regions"`
-	Reason           string    `db:"reason"`
-	LastTransitionAt time.Time `db:"last_transition_at"`
-	UpdatedAt        time.Time `db:"updated_at"`
+	MonitorID             string    `db:"monitor_id"`
+	Status                string    `db:"status"`
+	Scope                 string    `db:"scope"`
+	AffectedRegions       string    `db:"affected_regions"`
+	Reason                string    `db:"reason"`
+	FailureReasonsJson    string    `db:"failure_reasons_json"`
+	LastTransitionAt      time.Time `db:"last_transition_at"`
+	UpdatedAt             time.Time `db:"updated_at"`
 }
 
 type MonitorIncident struct {

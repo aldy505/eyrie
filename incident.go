@@ -36,14 +36,15 @@ const (
 )
 
 type IncidentEvaluation struct {
-	Status          string
-	Scope           string
-	Reason          string
-	AffectedRegions []string
+	Status                  string
+	Scope                   string
+	Reason                  string
+	AffectedRegions         []string
+	FailureReasonsBreakdown map[string][]string // category -> list of regions
 }
 
 func HealthyIncidentEvaluation() IncidentEvaluation {
-	return IncidentEvaluation{Status: MonitorStatusHealthy, Scope: MonitorScopeHealthy, AffectedRegions: []string{}}
+	return IncidentEvaluation{Status: MonitorStatusHealthy, Scope: MonitorScopeHealthy, AffectedRegions: []string{}, FailureReasonsBreakdown: make(map[string][]string)}
 }
 
 func (e IncidentEvaluation) Equal(other IncidentEvaluation) bool {
@@ -110,4 +111,27 @@ func (e IncidentEvaluation) ProgrammaticTitle(monitor Monitor) string {
 	default:
 		return monitor.Name + " is healthy"
 	}
+}
+
+func (e IncidentEvaluation) FailureReasonsJSON() string {
+	if len(e.FailureReasonsBreakdown) == 0 {
+		return "{}"
+	}
+	body, err := json.Marshal(e.FailureReasonsBreakdown)
+	if err != nil {
+		return "{}"
+	}
+	return string(body)
+}
+
+func ParseFailureReasonsJSON(raw string) map[string][]string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
+		return make(map[string][]string)
+	}
+	var breakdown map[string][]string
+	if err := json.Unmarshal([]byte(trimmed), &breakdown); err != nil || breakdown == nil {
+		return make(map[string][]string)
+	}
+	return breakdown
 }
