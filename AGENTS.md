@@ -10,6 +10,7 @@
 - Frontend lives under `frontend/` (Vite project).
 - Example YAML configs live under `example_configurations/`.
 - DuckDB migrations live under `migrations/`.
+- Worker code (`worker_*.go`) handles async processing via pubsub queues.
 
 ## Runtime Modes & Components
 ### Modes (entrypoint: `main.go`)
@@ -84,10 +85,19 @@ See `example_configurations/` for:
 - Uses **DuckDB** via `duckdb-go`.
 - Migration logic lives in `database_migration.go` and `migrations/`.
 - Server mode runs migrations on startup.
+- Migrations use Go + Goose with embedded files via `//go:embed`.
 - Incident storage currently spans:
   - `monitor_incident_state` for current derived health
   - `monitor_incidents` for active/resolved incident records
   - `monitor_incident_events` for timeline/history entries
+
+### Database Schema
+- `monitor_historical`: raw per-probe results (monitor_id, region, status_code, latency_ms, success, etc.)
+- `monitor_historical_daily_aggregate`: daily aggregates per monitor
+- `monitor_historical_region_daily_aggregate`: daily aggregates per monitor+region
+- `monitor_incident_state`: current incident state per monitor
+- `monitor_incidents`: incident records (lifecycle tracking)
+- `monitor_incident_events`: event timeline for incidents
 
 ## Messaging / Task Queue
 Uses `gocloud.dev/pubsub` with pluggable backends:
@@ -140,3 +150,9 @@ npm run dev
 - The SPA is embedded; missing `frontend/dist` will break builds/tests that compile `server.go`.
 - Task queues are configured via addresses; `mem://` is used in example configs for local dev.
 - Programmatic incidents are the current source of truth. The schema now preserves machine-derived fields separately from user-facing fields so manual adjustment can be layered in later without losing the original automatic context.
+- Workers use Sentry transactions for distributed tracing of processing pipelines.
+- Database migrations follow a timestamp-based naming convention and use Goose-style markers for up/down scripts.
+- Check probes implement various SQL and network checks with proper timeout and error handling.
+- Severity levels for incidents include: healthy, degraded, down.
+- Impact levels include: unknown, operational, maintenance, degraded_performance, partial_outage, major_outage.
+- Event types for incident lifecycle: created, updated, resolved.
