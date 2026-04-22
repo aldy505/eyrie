@@ -441,6 +441,128 @@ func TestServer_UptimeDataByRegionHandler_NotFound(t *testing.T) {
 	}
 }
 
+func TestServer_UptimeDataHandler_GroupsMonitorsWithoutNulls(t *testing.T) {
+	groupedMonitorIDs := []string{"coredns-node-1", "coredns-node-2"}
+	standaloneMonitorID := "login-server-prod"
+	allMonitorIDs := append(append([]string{}, groupedMonitorIDs...), standaloneMonitorID)
+	now := time.Now().UTC()
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+
+		for _, monitorID := range allMonitorIDs {
+			if _, err := conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID); err != nil {
+				t.Fatalf("failed to clean up monitor_historical table: %v", err)
+			}
+			if _, err := conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID); err != nil {
+				t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+			}
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:       db,
+		shutdown: make(chan struct{}),
+	}
+
+	for _, monitorID := range allMonitorIDs {
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  42,
+			StatusCode: 200,
+			Timestamp:  now,
+			Timings:    CheckerTraceTimings{},
+		}, "us-east-1"); err != nil {
+			t.Fatalf("failed to seed monitor history for %s: %v", monitorID, err)
+		}
+	}
+
+	server := &Server{
+		db:           db,
+		serverConfig: ServerConfig{},
+		monitorConfig: MonitorConfig{
+			Groups: []Group{
+				{
+					ID:         "coredns",
+					Name:       "CoreDNS",
+					MonitorIDs: groupedMonitorIDs,
+				},
+			},
+			Monitors: []Monitor{
+				{
+					ID:                  groupedMonitorIDs[0],
+					Name:                "CoreDNS Node 1",
+					ExpectedStatusCodes: []int{200},
+				},
+				{
+					ID:                  groupedMonitorIDs[1],
+					Name:                "CoreDNS Node 2",
+					ExpectedStatusCodes: []int{200},
+				},
+				{
+					ID:                  standaloneMonitorID,
+					Name:                "Login Server Production",
+					ExpectedStatusCodes: []int{200},
+				},
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/uptime-data", nil)
+	w := httptest.NewRecorder()
+
+	server.UptimeDataHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status code %d, got %d", http.StatusOK, w.Code)
+	}
+	if strings.Contains(w.Body.String(), `"monitors":null`) {
+		t.Fatalf("expected group monitors to serialize as arrays, got %s", w.Body.String())
+	}
+
+	var response UptimeDataHandlerResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(response.Monitors) != 2 {
+		t.Fatalf("expected 2 top-level monitor entries, got %d", len(response.Monitors))
+	}
+
+	var groupEntry *UptimeDataHandlerMonitorGroup
+	var singleEntry *UptimeDataHandlerMonitorGroup
+	for i := range response.Monitors {
+		entry := &response.Monitors[i]
+		switch entry.ID {
+		case "coredns":
+			groupEntry = entry
+		case standaloneMonitorID:
+			singleEntry = entry
+		case groupedMonitorIDs[0], groupedMonitorIDs[1]:
+			t.Fatalf("grouped monitor %s should not be returned as a standalone entry", entry.ID)
+		}
+	}
+
+	if groupEntry == nil {
+		t.Fatal("expected coredns group entry in response")
+	}
+	if len(groupEntry.Monitors) != len(groupedMonitorIDs) {
+		t.Fatalf("expected %d group monitors, got %d", len(groupedMonitorIDs), len(groupEntry.Monitors))
+	}
+	if singleEntry == nil {
+		t.Fatal("expected standalone monitor entry in response")
+	}
+	if len(singleEntry.Monitors) != 1 || singleEntry.Monitors[0].ID != standaloneMonitorID {
+		t.Fatalf("unexpected standalone monitor entry: %#v", singleEntry.Monitors)
+	}
+}
+
 func TestServer_CheckerRegistrationFiltersMonitorsByCheckerName(t *testing.T) {
 	server := &Server{
 		serverConfig: ServerConfig{

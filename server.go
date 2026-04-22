@@ -235,7 +235,7 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Prioritize group first
 	for _, group := range s.monitorConfig.Groups {
-		var groupMonitors []UptimeDataHandlerSingleMonitor
+		groupMonitors := make([]UptimeDataHandlerSingleMonitor, 0, len(group.MonitorIDs))
 		for _, monitorId := range group.MonitorIDs {
 			slog.InfoContext(ctx, "Trying to find monitor id: "+monitorId)
 			if idx, ok := monitorIndexByID[monitorId]; ok {

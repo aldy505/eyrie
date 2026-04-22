@@ -1,6 +1,8 @@
 groups:
   - id: "example-group-1"
     name: "Example Group 1"
+    # `monitor_ids` is the preferred field name. `monitors` is also accepted
+    # for backward compatibility and normalized to the same internal value.
     monitor_ids:
       - "example-monitor-1"
       - "example-monitor-3"

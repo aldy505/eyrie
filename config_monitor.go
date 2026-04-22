@@ -109,6 +109,37 @@ type Group struct {
 	MonitorIDs  []string    `yaml:"monitor_ids" json:"monitor_ids"`
 }
 
+func (g *Group) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type rawGroup struct {
+		ID          string      `yaml:"id"`
+		Name        string      `yaml:"name"`
+		Description null.String `yaml:"description"`
+		MonitorIDs  []string    `yaml:"monitor_ids"`
+		Monitors    []string    `yaml:"monitors"`
+	}
+
+	var raw rawGroup
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+
+	switch {
+	case len(raw.MonitorIDs) == 0:
+		raw.MonitorIDs = raw.Monitors
+	case len(raw.Monitors) > 0 && !slices.Equal(raw.MonitorIDs, raw.Monitors):
+		return fmt.Errorf("group %s: monitor_ids and monitors must match when both are set", raw.ID)
+	}
+
+	*g = Group{
+		ID:          raw.ID,
+		Name:        raw.Name,
+		Description: raw.Description,
+		MonitorIDs:  raw.MonitorIDs,
+	}
+
+	return nil
+}
+
 type MonitorConfig struct {
 	Monitors []Monitor `yaml:"monitors"`
 	Groups   []Group   `yaml:"groups"`
@@ -134,6 +165,24 @@ func (c MonitorConfig) Validate(registeredCheckers []RegisteredChecker) error {
 				return fmt.Errorf("monitor %s: checker_names contains unknown checker %q", monitor.ID, checkerName)
 			}
 			seenCheckerNames[checkerName] = struct{}{}
+		}
+	}
+
+	knownMonitorIDs := make(map[string]struct{}, len(c.Monitors))
+	for _, monitor := range c.Monitors {
+		knownMonitorIDs[monitor.ID] = struct{}{}
+	}
+
+	for _, group := range c.Groups {
+		seenMonitorIDs := make(map[string]struct{}, len(group.MonitorIDs))
+		for _, monitorID := range group.MonitorIDs {
+			if _, exists := knownMonitorIDs[monitorID]; !exists {
+				return fmt.Errorf("group %s: monitor_ids contains unknown monitor %q", group.ID, monitorID)
+			}
+			if _, exists := seenMonitorIDs[monitorID]; exists {
+				return fmt.Errorf("group %s: duplicate monitor reference %q", group.ID, monitorID)
+			}
+			seenMonitorIDs[monitorID] = struct{}{}
 		}
 	}
 

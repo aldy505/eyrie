@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/goccy/go-yaml"
+)
 
 func TestMonitorConfigValidateCheckerNames(t *testing.T) {
 	validCheckers := []RegisteredChecker{
@@ -64,5 +69,114 @@ func TestMonitorConfigForChecker(t *testing.T) {
 	}
 	if got := filtered.Groups[0].MonitorIDs; len(got) != 2 || got[0] != "global-http" || got[1] != "east-only" {
 		t.Fatalf("unexpected filtered group monitor ids: %#v", got)
+	}
+}
+
+func TestGroupUnmarshalSupportsMonitorsAlias(t *testing.T) {
+	var monitorConfig MonitorConfig
+	err := yaml.Unmarshal([]byte(`
+groups:
+  - id: app
+    name: App
+    monitors:
+      - api
+      - web
+monitors:
+  - id: api
+    name: API
+    type: http
+    http:
+      url: https://api.example.com/health
+  - id: web
+    name: Web
+    type: http
+    http:
+      url: https://example.com/health
+`), &monitorConfig)
+	if err != nil {
+		t.Fatalf("failed to unmarshal monitor config: %v", err)
+	}
+
+	if len(monitorConfig.Groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(monitorConfig.Groups))
+	}
+	if got := monitorConfig.Groups[0].MonitorIDs; len(got) != 2 || got[0] != "api" || got[1] != "web" {
+		t.Fatalf("unexpected group monitor ids: %#v", got)
+	}
+}
+
+func TestGroupUnmarshalRejectsConflictingAliases(t *testing.T) {
+	var monitorConfig MonitorConfig
+	err := yaml.Unmarshal([]byte(`
+groups:
+  - id: app
+    name: App
+    monitor_ids:
+      - api
+    monitors:
+      - web
+monitors:
+  - id: api
+    name: API
+    type: http
+    http:
+      url: https://api.example.com/health
+  - id: web
+    name: Web
+    type: http
+    http:
+      url: https://example.com/health
+`), &monitorConfig)
+	if err == nil {
+		t.Fatal("expected unmarshal to fail for conflicting group aliases")
+	}
+	if !strings.Contains(err.Error(), "monitor_ids and monitors must match") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMonitorConfigValidateGroupReferences(t *testing.T) {
+	config := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:   "api",
+				Type: MonitorTypeHTTP,
+				HTTP: &MonitorHTTPConfig{URL: "https://api.example.com/health"},
+			},
+		},
+		Groups: []Group{
+			{ID: "app", Name: "App", MonitorIDs: []string{"api", "missing"}},
+		},
+	}
+
+	err := config.Validate(nil)
+	if err == nil {
+		t.Fatal("expected validation to fail for unknown monitor reference")
+	}
+	if !strings.Contains(err.Error(), `unknown monitor "missing"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMonitorConfigValidateDuplicateGroupReferences(t *testing.T) {
+	config := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:   "api",
+				Type: MonitorTypeHTTP,
+				HTTP: &MonitorHTTPConfig{URL: "https://api.example.com/health"},
+			},
+		},
+		Groups: []Group{
+			{ID: "app", Name: "App", MonitorIDs: []string{"api", "api"}},
+		},
+	}
+
+	err := config.Validate(nil)
+	if err == nil {
+		t.Fatal("expected validation to fail for duplicate monitor reference")
+	}
+	if !strings.Contains(err.Error(), `duplicate monitor reference "api"`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
