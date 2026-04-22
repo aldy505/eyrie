@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { z } from "zod";
 import {
   Activity,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   Globe2,
   MapPin,
@@ -10,6 +12,8 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
+import { Button } from "./components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 
 const uptimeDataSchema = z.object({
   last_updated: z.coerce.date(),
@@ -119,6 +123,12 @@ function getWorstStatus(statuses: string[]) {
   return "healthy";
 }
 
+function getAvailabilityStatus(durationMinutes: number, metadata: Metadata) {
+  if (durationMinutes > metadata.failure_threshold_minutes) return "down";
+  if (durationMinutes > metadata.degraded_threshold_minutes) return "degraded";
+  return "healthy";
+}
+
 function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: Metadata }) {
   return (
     <div className="space-y-2">
@@ -133,15 +143,17 @@ function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: M
 
           const downtimeIndex = metadata.retention_days - index - 1;
           const downtime = monitor.downtimes[downtimeIndex];
+          const downtimeMinutes = downtime?.duration_minutes ?? 0;
+          const availabilityStatus = getAvailabilityStatus(downtimeMinutes, metadata);
 
           let className = "bg-emerald-400";
           let title = "No downtime";
-          if ((downtime?.duration_minutes ?? 0) > metadata.failure_threshold_minutes) {
+          if (availabilityStatus === "down") {
             className = "bg-rose-400";
-            title = `Downtime: ${downtime?.duration_minutes ?? 0} minutes`;
-          } else if ((downtime?.duration_minutes ?? 0) > metadata.degraded_threshold_minutes) {
+            title = `Downtime: ${downtimeMinutes} minutes`;
+          } else if (availabilityStatus === "degraded") {
             className = "bg-amber-300";
-            title = `Degraded: ${downtime?.duration_minutes ?? 0} minutes`;
+            title = `Degraded: ${downtimeMinutes} minutes`;
           }
 
           return (
@@ -152,6 +164,153 @@ function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: M
       <div className="flex justify-between text-[11px] uppercase tracking-[0.2em] text-slate-400">
         <span>{metadata.retention_days}d ago</span>
         <span>Today</span>
+      </div>
+    </div>
+  );
+}
+
+function GroupUptimeBars({
+  children,
+  metadata,
+}: {
+  children: SingleMonitor[];
+  metadata: Metadata;
+}) {
+  const dailySummaries = Array.from({ length: metadata.retention_days }).map((_, index) => {
+    const summary = {
+      healthy: 0,
+      degraded: 0,
+      down: 0,
+      noData: 0,
+    };
+
+    for (const child of children) {
+      const colorStartsAt = metadata.retention_days - child.age;
+      if (index < colorStartsAt) {
+        summary.noData += 1;
+        continue;
+      }
+
+      const downtimeIndex = metadata.retention_days - index - 1;
+      const downtimeMinutes = child.downtimes[downtimeIndex]?.duration_minutes ?? 0;
+      const availabilityStatus = getAvailabilityStatus(downtimeMinutes, metadata);
+      summary[availabilityStatus] += 1;
+    }
+
+    return summary;
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-1.5">
+        {dailySummaries.map((summary, index) => {
+          const total = children.length || 1;
+          const title = [
+            `Healthy: ${summary.healthy}`,
+            `Degraded: ${summary.degraded}`,
+            `Down: ${summary.down}`,
+            `No data: ${summary.noData}`,
+          ].join(" • ");
+
+          return (
+            <div
+              key={index}
+              className="flex h-8 w-3 flex-col overflow-hidden rounded-full bg-white/10"
+              title={title}
+            >
+              {summary.down > 0 && (
+                <div className="bg-rose-400" style={{ height: `${(summary.down / total) * 100}%` }} />
+              )}
+              {summary.degraded > 0 && (
+                <div
+                  className="bg-amber-300"
+                  style={{ height: `${(summary.degraded / total) * 100}%` }}
+                />
+              )}
+              {summary.healthy > 0 && (
+                <div
+                  className="bg-emerald-400"
+                  style={{ height: `${(summary.healthy / total) * 100}%` }}
+                />
+              )}
+              {summary.noData > 0 && (
+                <div
+                  className="bg-white/15"
+                  style={{ height: `${(summary.noData / total) * 100}%` }}
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex justify-between text-[11px] uppercase tracking-[0.2em] text-slate-400">
+        <span>{metadata.retention_days}d ago</span>
+        <span>Today</span>
+      </div>
+      <div className="flex flex-wrap gap-3 text-xs text-slate-400">
+        <span className="inline-flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+          Healthy children
+        </span>
+        <span className="inline-flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-amber-300" />
+          Degraded children
+        </span>
+        <span className="inline-flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-rose-400" />
+          Down children
+        </span>
+        <span className="inline-flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-white/15" />
+          No data
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function CollapsedGroupSummary({
+  children,
+  metadata,
+  childStatusCounts,
+  worstStatus,
+}: {
+  children: SingleMonitor[];
+  metadata: Metadata;
+  childStatusCounts: Record<"healthy" | "degraded" | "down", number>;
+  worstStatus: string;
+}) {
+  return (
+    <div className="mt-6 grid gap-5 border-t border-white/10 pt-6 xl:grid-cols-[1.15fr_0.85fr]">
+      <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs uppercase tracking-[0.25em] text-slate-500">Group availability</p>
+          <span className="text-xs text-slate-400">{children.length} child monitors</span>
+        </div>
+        <GroupUptimeBars children={children} metadata={metadata} />
+      </div>
+      <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
+        <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
+          Current child status
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3">
+            <p className="text-xs uppercase tracking-[0.2em] text-emerald-100">Healthy</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{childStatusCounts.healthy}</p>
+          </div>
+          <div className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3">
+            <p className="text-xs uppercase tracking-[0.2em] text-amber-100">Degraded</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{childStatusCounts.degraded}</p>
+          </div>
+          <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3">
+            <p className="text-xs uppercase tracking-[0.2em] text-rose-100">Down</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{childStatusCounts.down}</p>
+          </div>
+        </div>
+        <p className="mt-4 text-sm text-slate-300">
+          Worst child status right now:{" "}
+          <span className="font-medium text-white">{formatStatus(worstStatus)}</span>
+        </p>
       </div>
     </div>
   );
@@ -203,7 +362,9 @@ function MonitorCard({
   incidents: Map<string, Incident>;
   regionMap: Record<string, RegionData["monitors"]>;
 }) {
+  const [isExpanded, setIsExpanded] = useState(true);
   const children = monitor.monitors;
+  const isCollapsibleGroup = monitor.type === "group" && children.length > 1;
   const childIncidents = children
     .map((item) => incidents.get(item.id))
     .filter(Boolean) as Incident[];
@@ -215,119 +376,156 @@ function MonitorCard({
     children.length > 0
       ? Math.round(children.reduce((sum, item) => sum + item.response_time_ms, 0) / children.length)
       : 0;
+  const childStatusCounts = children.reduce<Record<"healthy" | "degraded" | "down", number>>(
+    (counts, child) => {
+      const status = incidents.get(child.id)?.status ?? "healthy";
+      if (status === "down" || status === "degraded") {
+        counts[status] += 1;
+      } else {
+        counts.healthy += 1;
+      }
+      return counts;
+    },
+    { healthy: 0, degraded: 0, down: 0 },
+  );
 
   return (
     <section className="rounded-[28px] border border-white/10 bg-slate-950/80 p-6 shadow-[0_30px_80px_-40px_rgba(15,23,42,0.9)] backdrop-blur">
-      <div className="flex flex-col gap-4 border-b border-white/10 pb-6 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-3">
-            <h2 className="text-2xl font-semibold text-white">{monitor.name}</h2>
-            <span
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[worstStatus] ?? statusTone.healthy}`}
-            >
-              {formatStatus(worstStatus)}
-            </span>
-            <span
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[scope] ?? scopeTone.healthy}`}
-            >
-              {formatScope(scope)}
-            </span>
+      <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
+        <div className="flex flex-col gap-4 border-b border-white/10 pb-6 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <h2 className="text-2xl font-semibold text-white">{monitor.name}</h2>
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[worstStatus] ?? statusTone.healthy}`}
+              >
+                {formatStatus(worstStatus)}
+              </span>
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[scope] ?? scopeTone.healthy}`}
+              >
+                {formatScope(scope)}
+              </span>
+              {isCollapsibleGroup && (
+                <CollapsibleTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="rounded-full border border-white/10 bg-white/5 px-3 text-xs font-semibold text-slate-200 hover:bg-white/10 hover:text-white"
+                  >
+                    {isExpanded ? "Collapse" : "Expand"}
+                    {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                  </Button>
+                </CollapsibleTrigger>
+              )}
+            </div>
+            {monitor.description && (
+              <p className="max-w-3xl text-sm text-slate-300">{monitor.description}</p>
+            )}
           </div>
-          {monitor.description && (
-            <p className="max-w-3xl text-sm text-slate-300">{monitor.description}</p>
-          )}
+          <div className="grid grid-cols-2 gap-3 text-sm text-slate-300 md:grid-cols-3">
+            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Latency</p>
+              <p className="mt-2 text-lg font-semibold text-white">{averageLatency} ms</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Monitors</p>
+              <p className="mt-2 text-lg font-semibold text-white">{children.length}</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Scope</p>
+              <p className="mt-2 text-lg font-semibold text-white">{formatScope(scope)}</p>
+            </div>
+          </div>
         </div>
-        <div className="grid grid-cols-2 gap-3 text-sm text-slate-300 md:grid-cols-3">
-          <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Latency</p>
-            <p className="mt-2 text-lg font-semibold text-white">{averageLatency} ms</p>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Monitors</p>
-            <p className="mt-2 text-lg font-semibold text-white">{children.length}</p>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Scope</p>
-            <p className="mt-2 text-lg font-semibold text-white">{formatScope(scope)}</p>
-          </div>
-        </div>
-      </div>
 
-      <div className="mt-6 grid gap-5">
-        {children.map((child) => {
-          const incident = incidents.get(child.id);
-          const regions = regionMap[child.id] ?? [];
-          return (
-            <article
-              key={child.id}
-              className="rounded-3xl border border-white/10 bg-white/[0.03] p-5"
-            >
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <h3 className="text-lg font-semibold text-white">{child.name}</h3>
-                    <span
-                      className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[incident?.status ?? "healthy"] ?? statusTone.healthy}`}
-                    >
-                      {formatStatus(incident?.status ?? "healthy")}
-                    </span>
-                    <span
-                      className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[incident?.scope ?? "healthy"] ?? scopeTone.healthy}`}
-                    >
-                      {formatScope(incident?.scope ?? "healthy")}
-                    </span>
-                    <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
-                      {incident?.probe_type ?? "http"}
-                    </span>
-                  </div>
-                  {child.description && (
-                    <p className="text-sm text-slate-300">{child.description}</p>
-                  )}
-                  <div className="flex flex-wrap gap-4 text-sm text-slate-300">
-                    <span className="inline-flex items-center gap-2">
-                      <Activity className="h-4 w-4 text-emerald-300" />
-                      {child.response_time_ms} ms
-                    </span>
-                    <span className="inline-flex items-center gap-2">
-                      <MapPin className="h-4 w-4 text-sky-300" />
-                      {regions.length} regions
-                    </span>
-                    <span className="inline-flex items-center gap-2">
-                      <Clock3 className="h-4 w-4 text-violet-300" />
-                      {child.age} days tracked
-                    </span>
-                  </div>
-                </div>
-                <div className="max-w-xl space-y-2 text-sm text-slate-300">
-                  <p className="font-medium text-white">
-                    {incident?.reason || "No active incident."}
-                  </p>
-                  {incident?.affected_regions.length ? (
-                    <p>Affected regions: {incident.affected_regions.join(", ")}</p>
-                  ) : (
-                    <p>All reporting regions are healthy.</p>
-                  )}
-                </div>
-              </div>
+        {isCollapsibleGroup && !isExpanded && (
+          <CollapsedGroupSummary
+            children={children}
+            metadata={metadata}
+            childStatusCounts={childStatusCounts}
+            worstStatus={worstStatus}
+          />
+        )}
 
-              <div className="mt-5 grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
-                <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
-                  <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
-                    Availability trend
-                  </p>
-                  <UptimeBars monitor={child} metadata={metadata} />
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
-                  <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
-                    Regional health
-                  </p>
-                  <RegionList regions={regions} incident={incident} />
-                </div>
-              </div>
-            </article>
-          );
-        })}
-      </div>
+        <CollapsibleContent>
+          <div className="mt-6 grid gap-5">
+            {children.map((child) => {
+              const incident = incidents.get(child.id);
+              const regions = regionMap[child.id] ?? [];
+              return (
+                <article
+                  key={child.id}
+                  className="rounded-3xl border border-white/10 bg-white/[0.03] p-5"
+                >
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <h3 className="text-lg font-semibold text-white">{child.name}</h3>
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[incident?.status ?? "healthy"] ?? statusTone.healthy}`}
+                        >
+                          {formatStatus(incident?.status ?? "healthy")}
+                        </span>
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[incident?.scope ?? "healthy"] ?? scopeTone.healthy}`}
+                        >
+                          {formatScope(incident?.scope ?? "healthy")}
+                        </span>
+                        <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+                          {incident?.probe_type ?? "http"}
+                        </span>
+                      </div>
+                      {child.description && (
+                        <p className="text-sm text-slate-300">{child.description}</p>
+                      )}
+                      <div className="flex flex-wrap gap-4 text-sm text-slate-300">
+                        <span className="inline-flex items-center gap-2">
+                          <Activity className="h-4 w-4 text-emerald-300" />
+                          {child.response_time_ms} ms
+                        </span>
+                        <span className="inline-flex items-center gap-2">
+                          <MapPin className="h-4 w-4 text-sky-300" />
+                          {regions.length} regions
+                        </span>
+                        <span className="inline-flex items-center gap-2">
+                          <Clock3 className="h-4 w-4 text-violet-300" />
+                          {child.age} days tracked
+                        </span>
+                      </div>
+                    </div>
+                    <div className="max-w-xl space-y-2 text-sm text-slate-300">
+                      <p className="font-medium text-white">
+                        {incident?.reason || "No active incident."}
+                      </p>
+                      {incident?.affected_regions.length ? (
+                        <p>Affected regions: {incident.affected_regions.join(", ")}</p>
+                      ) : (
+                        <p>All reporting regions are healthy.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-5 grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+                    <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
+                      <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
+                        Availability trend
+                      </p>
+                      <UptimeBars monitor={child} metadata={metadata} />
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
+                      <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
+                        Regional health
+                      </p>
+                      <RegionList regions={regions} incident={incident} />
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
     </section>
   );
 }
