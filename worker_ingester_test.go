@@ -25,9 +25,10 @@ func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 	})
 
 	ingesterWorker := &IngesterWorker{
-		db:         db,
-		subscriber: nil,
-		shutdown:   make(chan struct{}),
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: MonitorConfig{},
+		shutdown:      make(chan struct{}),
 	}
 
 	for i := 0; i < 1000; i++ {
@@ -118,12 +119,24 @@ func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
 		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
 	})
 
 	ingesterWorker := &IngesterWorker{
 		db:         db,
 		subscriber: nil,
-		shutdown:   make(chan struct{}),
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					ExpectedStatusCodes: []int{200},
+				},
+			},
+		},
+		shutdown: make(chan struct{}),
 	}
 
 	// Insert test data with known values
@@ -244,6 +257,88 @@ func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 	// Success rate should be approximately 86-87 depending on rounding
 	if successRate < 86 || successRate > 87 {
 		t.Errorf("expected success_rate between 86-87 after upsert, got %d", successRate)
+	}
+}
+
+func TestIngesterWorker_AggregateDailyMonitorHistoricalUsesMonitorSuccessSemantics(t *testing.T) {
+	monitorID := "test-aggregate-monitor-http-semantics"
+	testDate := time.Date(2025, 1, 18, 0, 0, 0, 0, time.UTC)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:         db,
+		subscriber: nil,
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					ExpectedStatusCodes: []int{200},
+				},
+			},
+		},
+		shutdown: make(chan struct{}),
+	}
+
+	for i := 0; i < 4; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			Success:    false,
+			LatencyMs:  int64(100 + i),
+			StatusCode: 200,
+			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest monitor historical on iteration %d: %v", i, err)
+		}
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, testDate); err != nil {
+		t.Fatalf("failed to aggregate daily monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for verification: %v", err)
+	}
+	defer conn.Close()
+
+	var successRate int
+	err = conn.QueryRowContext(ctx, `
+		SELECT success_rate
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ? AND date = ?
+	`, monitorID, testDate.Format("2006-01-02")).Scan(&successRate)
+	if err != nil {
+		t.Fatalf("failed to query aggregate data: %v", err)
+	}
+
+	if successRate != 100 {
+		t.Fatalf("expected success_rate = 100 when status codes are healthy, got %d", successRate)
 	}
 }
 

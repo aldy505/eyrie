@@ -17,17 +17,29 @@ import (
 // IngesterWorker is responsible for ingesting raw `monitor_historical`
 // and create daily aggregate.
 type IngesterWorker struct {
-	db         *sql.DB
-	subscriber *pubsub.Subscription
-	shutdown   chan struct{}
+	db            *sql.DB
+	subscriber    *pubsub.Subscription
+	monitorConfig MonitorConfig
+	shutdown      chan struct{}
 }
 
-func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription) *IngesterWorker {
+func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfig MonitorConfig) *IngesterWorker {
 	return &IngesterWorker{
-		db:         db,
-		subscriber: subscriber,
-		shutdown:   make(chan struct{}),
+		db:            db,
+		subscriber:    subscriber,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
 	}
+}
+
+func (w *IngesterWorker) findMonitorConfig(monitorID string) (Monitor, bool) {
+	for _, monitor := range w.monitorConfig.Monitors {
+		if monitor.ID == monitorID {
+			return monitor, true
+		}
+	}
+
+	return Monitor{}, false
 }
 
 // Start begins the ingestion process, listening for new messages.
@@ -306,58 +318,113 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 	ctx = span.Context()
 	defer span.Finish()
 
+	monitorConfig, found := w.findMonitorConfig(monitorID)
+	if !found {
+		return fmt.Errorf("finding monitor config: %w", ErrMonitorConfigNotFound)
+	}
+
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("getting db connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Aggregate daily data
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO monitor_historical_daily_aggregate (monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
-		SELECT
-			monitor_id,
-			DATE(created_at) AS date,
-			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
-			MIN(latency_ms) AS min_latency_ms,
-			MAX(latency_ms) AS max_latency_ms,
-			CAST(CAST(SUM(CASE WHEN success THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
+	rows, err := conn.QueryContext(ctx, `
+		SELECT region, success, status_code, latency_ms
 		FROM monitor_historical
 		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
-		GROUP BY monitor_id, DATE(created_at)
+	`, monitorID, date.Format("2006-01-02"))
+	if err != nil {
+		return fmt.Errorf("querying monitor historical for aggregation: %w", err)
+	}
+	defer rows.Close()
+
+	type aggregateStats struct {
+		count        int64
+		latencySum   int64
+		minLatencyMs int64
+		maxLatencyMs int64
+		successCount int64
+	}
+
+	updateStats := func(stats *aggregateStats, latencyMs int64, successful bool) {
+		if stats.count == 0 || latencyMs < stats.minLatencyMs {
+			stats.minLatencyMs = latencyMs
+		}
+		if stats.count == 0 || latencyMs > stats.maxLatencyMs {
+			stats.maxLatencyMs = latencyMs
+		}
+		stats.count++
+		stats.latencySum += latencyMs
+		if successful {
+			stats.successCount++
+		}
+	}
+
+	buildSuccessRate := func(stats aggregateStats) int64 {
+		if stats.count == 0 {
+			return 0
+		}
+
+		return int64(float64(stats.successCount) / float64(stats.count) * 100)
+	}
+
+	var dailyStats aggregateStats
+	regionStats := make(map[string]aggregateStats)
+	for rows.Next() {
+		var (
+			region     string
+			success    bool
+			statusCode int
+			latencyMs  int64
+		)
+		if err := rows.Scan(&region, &success, &statusCode, &latencyMs); err != nil {
+			return fmt.Errorf("scanning monitor historical for aggregation: %w", err)
+		}
+
+		isSuccessful := monitorConfig.IsSuccessfulStatus(statusCode, success)
+		updateStats(&dailyStats, latencyMs, isSuccessful)
+
+		regionAggregate := regionStats[region]
+		updateStats(&regionAggregate, latencyMs, isSuccessful)
+		regionStats[region] = regionAggregate
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating monitor historical for aggregation: %w", err)
+	}
+
+	if dailyStats.count == 0 {
+		return nil
+	}
+
+	_, err = conn.ExecContext(ctx, `
+		INSERT INTO monitor_historical_daily_aggregate (monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (monitor_id, date) DO UPDATE
 		SET
 			avg_latency_ms = EXCLUDED.avg_latency_ms,
 			min_latency_ms = EXCLUDED.min_latency_ms,
 			max_latency_ms = EXCLUDED.max_latency_ms,
 			success_rate = EXCLUDED.success_rate
-	`, monitorID, date.Format("2006-01-02"))
+	`, monitorID, date.Format("2006-01-02"), dailyStats.latencySum/dailyStats.count, dailyStats.minLatencyMs, dailyStats.maxLatencyMs, buildSuccessRate(dailyStats))
 	if err != nil {
-		return fmt.Errorf("aggregating daily monitor historical: %w", err)
+		return fmt.Errorf("upserting daily aggregate monitor historical: %w", err)
 	}
 
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO monitor_historical_region_daily_aggregate (monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
-		SELECT
-			monitor_id,
-			region,
-			DATE(created_at) AS date,
-			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
-			MIN(latency_ms) AS min_latency_ms,
-			MAX(latency_ms) AS max_latency_ms,
-			CAST(CAST(SUM(CASE WHEN success THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
-		FROM monitor_historical
-		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
-		GROUP BY monitor_id, region, DATE(created_at)
-		ON CONFLICT (monitor_id, region, date) DO UPDATE
-		SET
-			avg_latency_ms = EXCLUDED.avg_latency_ms,
-			min_latency_ms = EXCLUDED.min_latency_ms,
-			max_latency_ms = EXCLUDED.max_latency_ms,
-			success_rate = EXCLUDED.success_rate
-	`, monitorID, date.Format("2006-01-02"))
-	if err != nil {
-		return fmt.Errorf("aggregating region daily monitor historical: %w", err)
+	for region, stats := range regionStats {
+		_, err = conn.ExecContext(ctx, `
+			INSERT INTO monitor_historical_region_daily_aggregate (monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (monitor_id, region, date) DO UPDATE
+			SET
+				avg_latency_ms = EXCLUDED.avg_latency_ms,
+				min_latency_ms = EXCLUDED.min_latency_ms,
+				max_latency_ms = EXCLUDED.max_latency_ms,
+				success_rate = EXCLUDED.success_rate
+		`, monitorID, region, date.Format("2006-01-02"), stats.latencySum/stats.count, stats.minLatencyMs, stats.maxLatencyMs, buildSuccessRate(stats))
+		if err != nil {
+			return fmt.Errorf("upserting region daily aggregate monitor historical: %w", err)
+		}
 	}
 
 	return nil
