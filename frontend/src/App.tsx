@@ -96,6 +96,9 @@ type Incident = IncidentsData["incidents"][number];
 type AvailabilityStatus = "healthy" | "degraded" | "down";
 
 const BASE_URL = import.meta.env.VITE_BASE_URL ?? "";
+const MINUTES_PER_DAY = 24 * 60;
+const ROSE_400: [number, number, number] = [251, 113, 133];
+const EMERALD_400: [number, number, number] = [52, 211, 153];
 
 const statusTone: Record<string, string> = {
   healthy: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/20",
@@ -117,6 +120,10 @@ function formatScope(scope: string) {
   return scope.charAt(0).toUpperCase() + scope.slice(1);
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function getWorstStatus(statuses: string[]) {
   if (statuses.includes("down")) return "down";
   if (statuses.includes("degraded")) return "degraded";
@@ -130,6 +137,36 @@ function getAvailabilityStatus(
   if (durationMinutes > metadata.failure_threshold_minutes) return "down";
   if (durationMinutes > metadata.degraded_threshold_minutes) return "degraded";
   return "healthy";
+}
+
+function getAvailabilityRatio(durationMinutes: number) {
+  const downtime = clamp(durationMinutes, 0, MINUTES_PER_DAY);
+  return 1 - downtime / MINUTES_PER_DAY;
+}
+
+function interpolateRgbColor(
+  startColor: [number, number, number],
+  endColor: [number, number, number],
+  ratio: number,
+) {
+  const clampedRatio = clamp(ratio, 0, 1);
+  const [red, green, blue] = startColor.map((channel, index) =>
+    Math.round(channel + (endColor[index] - channel) * clampedRatio),
+  );
+  return `rgb(${red} ${green} ${blue})`;
+}
+
+function getAvailabilityBarColor(durationMinutes: number) {
+  return interpolateRgbColor(ROSE_400, EMERALD_400, getAvailabilityRatio(durationMinutes));
+}
+
+function formatAvailability(availabilityRatio: number) {
+  const percentage = clamp(availabilityRatio * 100, 0, 100);
+  if (percentage === 100) {
+    return "100%";
+  }
+
+  return `${percentage.toFixed(2)}%`;
 }
 
 function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: Metadata }) {
@@ -147,20 +184,22 @@ function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: M
           const downtimeIndex = metadata.retention_days - index - 1;
           const downtime = monitor.downtimes[downtimeIndex];
           const downtimeMinutes = downtime?.duration_minutes ?? 0;
+          const availabilityRatio = getAvailabilityRatio(downtimeMinutes);
           const availabilityStatus = getAvailabilityStatus(downtimeMinutes, metadata);
-
-          let className = "bg-emerald-400";
-          let title = "No downtime";
-          if (availabilityStatus === "down") {
-            className = "bg-rose-400";
-            title = `Downtime: ${downtimeMinutes} minutes`;
-          } else if (availabilityStatus === "degraded") {
-            className = "bg-amber-300";
-            title = `Degraded: ${downtimeMinutes} minutes`;
-          }
+          const backgroundColor = getAvailabilityBarColor(downtimeMinutes);
+          const title = [
+            formatStatus(availabilityStatus),
+            `Availability: ${formatAvailability(availabilityRatio)}`,
+            `Downtime: ${downtimeMinutes} minutes`,
+          ].join(" • ");
 
           return (
-            <div key={index} className={`h-8 w-2.5 rounded-full ${className}`} title={title} />
+            <div
+              key={index}
+              className="h-8 w-2.5 rounded-full"
+              style={{ backgroundColor }}
+              title={title}
+            />
           );
         })}
       </div>
