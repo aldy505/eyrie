@@ -12,7 +12,6 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
-import { Button } from "./components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 
 const uptimeDataSchema = z.object({
@@ -94,6 +93,7 @@ type IncidentsData = z.infer<typeof incidentsSchema>;
 type RegionData = z.infer<typeof regionSchema>;
 type SingleMonitor = UptimeData["monitors"][number]["monitors"][number];
 type Incident = IncidentsData["incidents"][number];
+type AvailabilityStatus = "healthy" | "degraded" | "down";
 
 const BASE_URL = import.meta.env.VITE_BASE_URL ?? "";
 
@@ -123,7 +123,10 @@ function getWorstStatus(statuses: string[]) {
   return "healthy";
 }
 
-function getAvailabilityStatus(durationMinutes: number, metadata: Metadata) {
+function getAvailabilityStatus(
+  durationMinutes: number,
+  metadata: Metadata,
+): AvailabilityStatus {
   if (durationMinutes > metadata.failure_threshold_minutes) return "down";
   if (durationMinutes > metadata.degraded_threshold_minutes) return "degraded";
   return "healthy";
@@ -170,10 +173,10 @@ function UptimeBars({ monitor, metadata }: { monitor: SingleMonitor; metadata: M
 }
 
 function GroupUptimeBars({
-  children,
+  childMonitors,
   metadata,
 }: {
-  children: SingleMonitor[];
+  childMonitors: SingleMonitor[];
   metadata: Metadata;
 }) {
   const dailySummaries = Array.from({ length: metadata.retention_days }).map((_, index) => {
@@ -184,7 +187,7 @@ function GroupUptimeBars({
       noData: 0,
     };
 
-    for (const child of children) {
+    for (const child of childMonitors) {
       const colorStartsAt = metadata.retention_days - child.age;
       if (index < colorStartsAt) {
         summary.noData += 1;
@@ -204,7 +207,7 @@ function GroupUptimeBars({
     <div className="space-y-3">
       <div className="flex flex-wrap gap-1.5">
         {dailySummaries.map((summary, index) => {
-          const total = children.length || 1;
+          const total = childMonitors.length || 1;
           const title = [
             `Healthy: ${summary.healthy}`,
             `Degraded: ${summary.degraded}`,
@@ -270,14 +273,14 @@ function GroupUptimeBars({
 }
 
 function CollapsedGroupSummary({
-  children,
+  childMonitors,
   metadata,
   childStatusCounts,
   worstStatus,
 }: {
-  children: SingleMonitor[];
+  childMonitors: SingleMonitor[];
   metadata: Metadata;
-  childStatusCounts: Record<"healthy" | "degraded" | "down", number>;
+  childStatusCounts: Record<AvailabilityStatus, number>;
   worstStatus: string;
 }) {
   return (
@@ -285,9 +288,9 @@ function CollapsedGroupSummary({
       <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs uppercase tracking-[0.25em] text-slate-500">Group availability</p>
-          <span className="text-xs text-slate-400">{children.length} child monitors</span>
+          <span className="text-xs text-slate-400">{childMonitors.length} child monitors</span>
         </div>
-        <GroupUptimeBars children={children} metadata={metadata} />
+        <GroupUptimeBars childMonitors={childMonitors} metadata={metadata} />
       </div>
       <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
         <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
@@ -376,7 +379,7 @@ function MonitorCard({
     children.length > 0
       ? Math.round(children.reduce((sum, item) => sum + item.response_time_ms, 0) / children.length)
       : 0;
-  const childStatusCounts = children.reduce<Record<"healthy" | "degraded" | "down", number>>(
+  const childStatusCounts = children.reduce<Record<AvailabilityStatus, number>>(
     (counts, child) => {
       const status = incidents.get(child.id)?.status ?? "healthy";
       if (status === "down" || status === "degraded") {
@@ -407,15 +410,9 @@ function MonitorCard({
                 {formatScope(scope)}
               </span>
               {isCollapsibleGroup && (
-                <CollapsibleTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="rounded-full border border-white/10 bg-white/5 px-3 text-xs font-semibold text-slate-200 hover:bg-white/10 hover:text-white"
-                  >
-                    {isExpanded ? "Collapse" : "Expand"}
-                    {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                  </Button>
+                <CollapsibleTrigger className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-200 transition-colors hover:bg-white/10 hover:text-white">
+                  {isExpanded ? "Collapse" : "Expand"}
+                  {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </CollapsibleTrigger>
               )}
             </div>
@@ -441,7 +438,7 @@ function MonitorCard({
 
         {isCollapsibleGroup && !isExpanded && (
           <CollapsedGroupSummary
-            children={children}
+            childMonitors={children}
             metadata={metadata}
             childStatusCounts={childStatusCounts}
             worstStatus={worstStatus}
