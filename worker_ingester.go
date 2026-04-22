@@ -17,17 +17,57 @@ import (
 // IngesterWorker is responsible for ingesting raw `monitor_historical`
 // and create daily aggregate.
 type IngesterWorker struct {
-	db         *sql.DB
-	subscriber *pubsub.Subscription
-	shutdown   chan struct{}
+	db            *sql.DB
+	subscriber    *pubsub.Subscription
+	monitorConfig MonitorConfig
+	shutdown      chan struct{}
 }
 
-func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription) *IngesterWorker {
+func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfig MonitorConfig) *IngesterWorker {
 	return &IngesterWorker{
-		db:         db,
-		subscriber: subscriber,
-		shutdown:   make(chan struct{}),
+		db:            db,
+		subscriber:    subscriber,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
 	}
+}
+
+func (w *IngesterWorker) findMonitorConfig(monitorID string) (Monitor, bool) {
+	for _, monitor := range w.monitorConfig.Monitors {
+		if monitor.ID == monitorID {
+			return monitor, true
+		}
+	}
+
+	return Monitor{}, false
+}
+
+func buildSuccessCountExpression(monitorConfig Monitor) (string, []any) {
+	switch monitorConfig.EffectiveType() {
+	case MonitorTypeHTTP:
+		expectedStatusCodes := monitorConfig.EffectiveHTTP().ExpectedStatusCodes
+		placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(expectedStatusCodes)), ", ")
+		args := make([]any, 0, len(expectedStatusCodes))
+		for _, statusCode := range expectedStatusCodes {
+			args = append(args, statusCode)
+		}
+
+		return fmt.Sprintf("CASE WHEN status_code IN (%s) THEN 1 ELSE 0 END", placeholders), args
+	default:
+		return "CASE WHEN success THEN 1 ELSE 0 END", nil
+	}
+}
+
+func (w *IngesterWorker) determineHistoricalSuccess(monitorID string, probeType string, submission CheckerSubmissionRequest) bool {
+	if monitorConfig, found := w.findMonitorConfig(monitorID); found {
+		return monitorConfig.IsSuccessfulStatus(submission.StatusCode, submission.Success)
+	}
+
+	if !submission.Success && (probeType == string(MonitorTypeHTTP) || probeType == "") {
+		return submission.StatusCode >= 200 && submission.StatusCode < 400
+	}
+
+	return submission.Success
 }
 
 // Start begins the ingestion process, listening for new messages.
@@ -220,10 +260,7 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 	if probeType == "" {
 		probeType = string(MonitorTypeHTTP)
 	}
-	success := submission.Success
-	if !success && (probeType == string(MonitorTypeHTTP) || probeType == "") {
-		success = submission.StatusCode >= 200 && submission.StatusCode < 400
-	}
+	success := w.determineHistoricalSuccess(submission.MonitorID, probeType, submission)
 
 	// Insert raw monitor historical data
 	_, err = conn.ExecContext(ctx, `
@@ -306,14 +343,22 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 	ctx = span.Context()
 	defer span.Finish()
 
+	monitorConfig, found := w.findMonitorConfig(monitorID)
+	if !found {
+		// Historical data can outlive monitor configuration after a monitor is
+		// removed or renamed. Skip stale monitor IDs to avoid noisy periodic errors.
+		return nil
+	}
+
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("getting db connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Aggregate daily data
-	_, err = conn.ExecContext(ctx, `
+	successCountExpression, successCountArgs := buildSuccessCountExpression(monitorConfig)
+	dailyAggregateArgs := append(append([]any{}, successCountArgs...), monitorID, date.Format("2006-01-02"))
+	_, err = conn.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO monitor_historical_daily_aggregate (monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
 		SELECT
 			monitor_id,
@@ -321,7 +366,7 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
 			MIN(latency_ms) AS min_latency_ms,
 			MAX(latency_ms) AS max_latency_ms,
-			CAST(CAST(SUM(CASE WHEN success THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
+			CAST(SUM(%s) * 100 / COUNT(*) AS SMALLINT) AS success_rate
 		FROM monitor_historical
 		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
 		GROUP BY monitor_id, DATE(created_at)
@@ -331,12 +376,13 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 			min_latency_ms = EXCLUDED.min_latency_ms,
 			max_latency_ms = EXCLUDED.max_latency_ms,
 			success_rate = EXCLUDED.success_rate
-	`, monitorID, date.Format("2006-01-02"))
+	`, successCountExpression), dailyAggregateArgs...)
 	if err != nil {
-		return fmt.Errorf("aggregating daily monitor historical: %w", err)
+		return fmt.Errorf("upserting daily aggregate monitor historical: %w", err)
 	}
 
-	_, err = conn.ExecContext(ctx, `
+	regionAggregateArgs := append(append([]any{}, successCountArgs...), monitorID, date.Format("2006-01-02"))
+	_, err = conn.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO monitor_historical_region_daily_aggregate (monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
 		SELECT
 			monitor_id,
@@ -345,7 +391,7 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
 			MIN(latency_ms) AS min_latency_ms,
 			MAX(latency_ms) AS max_latency_ms,
-			CAST(CAST(SUM(CASE WHEN success THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 AS SMALLINT) AS success_rate
+			CAST(SUM(%s) * 100 / COUNT(*) AS SMALLINT) AS success_rate
 		FROM monitor_historical
 		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
 		GROUP BY monitor_id, region, DATE(created_at)
@@ -355,9 +401,9 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 			min_latency_ms = EXCLUDED.min_latency_ms,
 			max_latency_ms = EXCLUDED.max_latency_ms,
 			success_rate = EXCLUDED.success_rate
-	`, monitorID, date.Format("2006-01-02"))
+	`, successCountExpression), regionAggregateArgs...)
 	if err != nil {
-		return fmt.Errorf("aggregating region daily monitor historical: %w", err)
+		return fmt.Errorf("upserting region daily aggregate monitor historical: %w", err)
 	}
 
 	return nil

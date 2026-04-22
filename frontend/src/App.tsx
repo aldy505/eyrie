@@ -434,7 +434,7 @@ function RegionList({
 }) {
   const affected = new Set(incident?.affected_regions ?? []);
   return (
-    <div className="flex gap-3 overflow-x-auto pb-1">
+    <div className="region-list-scrollbar flex gap-3 overflow-x-auto pb-2 pr-1">
       {regions.map((region) => {
         const isAffected = affected.has(region.region);
         return (
@@ -497,6 +497,84 @@ function MonitorCard({
     },
     { healthy: 0, degraded: 0, down: 0 },
   );
+  const detailContent = (
+    <div className="mt-6 grid gap-5">
+      {children.map((child) => {
+        const incident = incidents.get(child.id);
+        const regions = regionMap[child.id] ?? [];
+        return (
+          <article
+            key={child.id}
+            className="min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] p-5"
+          >
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between lg:gap-6">
+              <div className="min-w-0 flex-1 space-y-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <h3 className="break-words text-lg font-semibold text-white">{child.name}</h3>
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[incident?.status ?? "healthy"] ?? statusTone.healthy}`}
+                  >
+                    {formatStatus(incident?.status ?? "healthy")}
+                  </span>
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[incident?.scope ?? "healthy"] ?? scopeTone.healthy}`}
+                  >
+                    {formatScope(incident?.scope ?? "healthy")}
+                  </span>
+                  <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+                    {incident?.probe_type ?? "http"}
+                  </span>
+                </div>
+                {child.description && (
+                  <p className="break-words text-sm text-slate-300">{child.description}</p>
+                )}
+                <div className="flex flex-wrap gap-4 text-sm text-slate-300">
+                  <span className="inline-flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-emerald-300" />
+                    {child.response_time_ms} ms
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <MapPin className="h-4 w-4 text-sky-300" />
+                    {regions.length} regions
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <Clock3 className="h-4 w-4 text-violet-300" />
+                    {child.age} days tracked
+                  </span>
+                </div>
+              </div>
+              <div className="min-w-0 w-full space-y-2 text-sm text-slate-300 lg:max-w-xl lg:flex-1">
+                <p className="break-words font-medium text-white">
+                  {incident?.reason || "No active incident."}
+                </p>
+                {incident?.affected_regions.length ? (
+                  <p className="break-words">Affected regions: {incident.affected_regions.join(", ")}</p>
+                ) : (
+                  <p>All reporting regions are healthy.</p>
+                )}
+                {incident && <FailureReasonsBreakdown incident={incident} />}
+              </div>
+            </div>
+
+            <div className="mt-5 flex min-w-0 flex-col gap-5">
+              <div className="min-w-0 rounded-2xl border border-white/10 bg-slate-900/80 p-4">
+                <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
+                  Availability trend
+                </p>
+                <UptimeBars monitor={child} metadata={metadata} />
+              </div>
+              <div className="min-w-0 rounded-2xl border border-white/10 bg-slate-900/80 p-4">
+                <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
+                  Regional health
+                </p>
+                <RegionList regions={regions} incident={incident} />
+              </div>
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
 
   return (
     <section className="rounded-[28px] border border-white/10 bg-slate-950/80 p-6 shadow-[0_30px_80px_-40px_rgba(15,23,42,0.9)] backdrop-blur">
@@ -554,84 +632,11 @@ function MonitorCard({
           />
         )}
 
-        <CollapsibleContent>
-          <div className="mt-6 grid gap-5">
-            {children.map((child) => {
-              const incident = incidents.get(child.id);
-              const regions = regionMap[child.id] ?? [];
-              return (
-                <article
-                  key={child.id}
-                  className="rounded-3xl border border-white/10 bg-white/[0.03] p-5"
-                >
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="space-y-3">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <h3 className="text-lg font-semibold text-white">{child.name}</h3>
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone[incident?.status ?? "healthy"] ?? statusTone.healthy}`}
-                        >
-                          {formatStatus(incident?.status ?? "healthy")}
-                        </span>
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-semibold ${scopeTone[incident?.scope ?? "healthy"] ?? scopeTone.healthy}`}
-                        >
-                          {formatScope(incident?.scope ?? "healthy")}
-                        </span>
-                        <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
-                          {incident?.probe_type ?? "http"}
-                        </span>
-                      </div>
-                      {child.description && (
-                        <p className="text-sm text-slate-300">{child.description}</p>
-                      )}
-                      <div className="flex flex-wrap gap-4 text-sm text-slate-300">
-                        <span className="inline-flex items-center gap-2">
-                          <Activity className="h-4 w-4 text-emerald-300" />
-                          {child.response_time_ms} ms
-                        </span>
-                        <span className="inline-flex items-center gap-2">
-                          <MapPin className="h-4 w-4 text-sky-300" />
-                          {regions.length} regions
-                        </span>
-                        <span className="inline-flex items-center gap-2">
-                          <Clock3 className="h-4 w-4 text-violet-300" />
-                          {child.age} days tracked
-                        </span>
-                      </div>
-                    </div>
-                    <div className="max-w-xl space-y-2 text-sm text-slate-300">
-                      <p className="font-medium text-white">
-                        {incident?.reason || "No active incident."}
-                      </p>
-                      {incident?.affected_regions.length ? (
-                        <p>Affected regions: {incident.affected_regions.join(", ")}</p>
-                      ) : (
-                        <p>All reporting regions are healthy.</p>
-                      )}
-                      {incident && <FailureReasonsBreakdown incident={incident} />}
-                    </div>
-                  </div>
-
-                  <div className="mt-5 flex flex-col gap-5">
-                    <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
-                      <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
-                        Availability trend
-                      </p>
-                      <UptimeBars monitor={child} metadata={metadata} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-4">
-                      <p className="mb-4 text-xs uppercase tracking-[0.25em] text-slate-500">
-                        Regional health
-                      </p>
-                      <RegionList regions={regions} incident={incident} />
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        </CollapsibleContent>
+        {isCollapsibleGroup ? (
+          <CollapsibleContent>{detailContent}</CollapsibleContent>
+        ) : (
+          detailContent
+        )}
       </Collapsible>
     </section>
   );

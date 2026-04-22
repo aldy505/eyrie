@@ -128,3 +128,29 @@ body {
   min-height: 100vh;
   margin: 0;
 }
+
+.region-list-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 0.7) rgb(15 23 42 / 0.35);
+}
+
+.region-list-scrollbar::-webkit-scrollbar {
+  height: 10px;
+}
+
+.region-list-scrollbar::-webkit-scrollbar-track {
+  border-radius: 9999px;
+  background: rgb(15 23 42 / 0.35);
+}
+
+.region-list-scrollbar::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, rgb(56 189 248 / 0.8), rgb(168 85 247 / 0.8));
+  background-clip: padding-box;
+}
+
+.region-list-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(90deg, rgb(125 211 252 / 0.9), rgb(196 181 253 / 0.9));
+  background-clip: padding-box;
+}

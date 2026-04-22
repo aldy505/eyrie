@@ -25,9 +25,10 @@ func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 	})
 
 	ingesterWorker := &IngesterWorker{
-		db:         db,
-		subscriber: nil,
-		shutdown:   make(chan struct{}),
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: MonitorConfig{},
+		shutdown:      make(chan struct{}),
 	}
 
 	for i := 0; i < 1000; i++ {
@@ -98,6 +99,76 @@ func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 	}
 }
 
+func TestIngesterWorker_IngestMonitorHistoricalUsesMonitorSuccessSemantics(t *testing.T) {
+	monitorID := "test-ingest-monitor-http-semantics"
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:         db,
+		subscriber: nil,
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					ExpectedStatusCodes: []int{418},
+				},
+			},
+		},
+		shutdown: make(chan struct{}),
+	}
+
+	submission := CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		ProbeType:  string(MonitorTypeHTTP),
+		Success:    false,
+		LatencyMs:  100,
+		StatusCode: 418,
+		Timestamp:  time.Now().UTC(),
+		Timings:    CheckerTraceTimings{},
+	}
+
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+		t.Fatalf("failed to ingest monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for verification: %v", err)
+	}
+	defer conn.Close()
+
+	var success bool
+	err = conn.QueryRowContext(ctx, `
+		SELECT success
+		FROM monitor_historical
+		WHERE monitor_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, monitorID).Scan(&success)
+	if err != nil {
+		t.Fatalf("failed to query monitor_historical success: %v", err)
+	}
+
+	if !success {
+		t.Fatalf("expected persisted success to honor custom expected status codes")
+	}
+}
+
 func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 	monitorID := "test-aggregate-monitor"
 	testDate := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)
@@ -118,12 +189,24 @@ func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
 		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
 	})
 
 	ingesterWorker := &IngesterWorker{
 		db:         db,
 		subscriber: nil,
-		shutdown:   make(chan struct{}),
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					ExpectedStatusCodes: []int{200},
+				},
+			},
+		},
+		shutdown: make(chan struct{}),
 	}
 
 	// Insert test data with known values
@@ -244,6 +327,159 @@ func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 	// Success rate should be approximately 86-87 depending on rounding
 	if successRate < 86 || successRate > 87 {
 		t.Errorf("expected success_rate between 86-87 after upsert, got %d", successRate)
+	}
+}
+
+func TestIngesterWorker_AggregateDailyMonitorHistoricalUsesMonitorSuccessSemantics(t *testing.T) {
+	monitorID := "test-aggregate-monitor-http-semantics"
+	testDate := time.Date(2025, 1, 18, 0, 0, 0, 0, time.UTC)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:         db,
+		subscriber: nil,
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					ExpectedStatusCodes: []int{418},
+				},
+			},
+		},
+		shutdown: make(chan struct{}),
+	}
+
+	for i := 0; i < 4; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			Success:    false,
+			LatencyMs:  int64(100 + i),
+			StatusCode: 418,
+			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest monitor historical on iteration %d: %v", i, err)
+		}
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, testDate); err != nil {
+		t.Fatalf("failed to aggregate daily monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for verification: %v", err)
+	}
+	defer conn.Close()
+
+	var successRate int
+	err = conn.QueryRowContext(ctx, `
+		SELECT success_rate
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ? AND date = ?
+	`, monitorID, testDate.Format("2006-01-02")).Scan(&successRate)
+	if err != nil {
+		t.Fatalf("failed to query aggregate data: %v", err)
+	}
+
+	if successRate != 100 {
+		t.Fatalf("expected success_rate = 100 when custom expected status codes are healthy, got %d", successRate)
+	}
+}
+
+func TestIngesterWorker_AggregateDailyMonitorHistoricalSkipsUnknownMonitorConfig(t *testing.T) {
+	monitorID := "test-aggregate-missing-monitor-config"
+	testDate := time.Date(2025, 1, 22, 0, 0, 0, 0, time.UTC)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: MonitorConfig{},
+		shutdown:      make(chan struct{}),
+	}
+
+	submission := CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		Success:    true,
+		LatencyMs:  100,
+		StatusCode: 200,
+		Timestamp:  testDate,
+		Timings:    CheckerTraceTimings{},
+	}
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+		t.Fatalf("failed to ingest monitor historical: %v", err)
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, testDate); err != nil {
+		t.Fatalf("expected missing monitor config to be skipped, got error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for verification: %v", err)
+	}
+	defer conn.Close()
+
+	var count int
+	err = conn.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ? AND date = ?
+	`, monitorID, testDate.Format("2006-01-02")).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query aggregate data: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no aggregate row for missing monitor config, got %d", count)
 	}
 }
 
