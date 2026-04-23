@@ -15,6 +15,20 @@ import {
 } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 
+const singleMonitorSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullish(),
+  response_time_ms: z.number(),
+  age: z.number(),
+  downtimes: z.record(
+    z.string(),
+    z.object({
+      duration_minutes: z.number(),
+    }),
+  ),
+});
+
 const uptimeDataSchema = z.object({
   last_updated: z.coerce.date(),
   monitors: z.array(
@@ -23,21 +37,7 @@ const uptimeDataSchema = z.object({
       id: z.string(),
       name: z.string(),
       description: z.string().nullish(),
-      monitors: z.array(
-        z.object({
-          id: z.string(),
-          name: z.string(),
-          description: z.string().nullish(),
-          response_time_ms: z.number(),
-          age: z.number(),
-          downtimes: z.record(
-            z.string(),
-            z.object({
-              duration_minutes: z.number(),
-            }),
-          ),
-        }),
-      ),
+      monitors: z.array(singleMonitorSchema.nullable()),
     }),
   ),
 });
@@ -89,11 +89,21 @@ const regionSchema = z.object({
   ),
 });
 
-type UptimeData = z.infer<typeof uptimeDataSchema>;
+type RawUptimeData = z.infer<typeof uptimeDataSchema>;
 type Metadata = z.infer<typeof metadataSchema>;
 type IncidentsData = z.infer<typeof incidentsSchema>;
 type RegionData = z.infer<typeof regionSchema>;
-type SingleMonitor = UptimeData["monitors"][number]["monitors"][number];
+type SingleMonitor = z.infer<typeof singleMonitorSchema>;
+type UptimeData = {
+  last_updated: RawUptimeData["last_updated"];
+  monitors: Array<{
+    type: RawUptimeData["monitors"][number]["type"];
+    id: string;
+    name: string;
+    description?: string | null;
+    monitors: SingleMonitor[];
+  }>;
+};
 type Incident = IncidentsData["incidents"][number];
 type AvailabilityStatus = "healthy" | "degraded" | "down";
 
@@ -101,6 +111,16 @@ const BASE_URL = import.meta.env.VITE_BASE_URL ?? "";
 const MINUTES_PER_DAY = 24 * 60;
 const ROSE_400: [number, number, number] = [251, 113, 133];
 const EMERALD_400: [number, number, number] = [52, 211, 153];
+
+function normalizeUptimeData(data: RawUptimeData): UptimeData {
+  return {
+    last_updated: data.last_updated,
+    monitors: data.monitors.map((group) => ({
+      ...group,
+      monitors: group.monitors.filter((monitor): monitor is SingleMonitor => monitor !== null),
+    })),
+  };
+}
 
 const statusTone: Record<string, string> = {
   healthy: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/20",
@@ -659,7 +679,7 @@ function App() {
       fetch(`${BASE_URL}/monitor-incidents`).then((response) => response.json()),
     ])
       .then(([uptimeJson, configJson, incidentsJson]) => {
-        const parsedData = uptimeDataSchema.parse(uptimeJson);
+        const parsedData = normalizeUptimeData(uptimeDataSchema.parse(uptimeJson));
         const parsedMetadata = metadataSchema.parse(configJson);
         const parsedIncidents = incidentsSchema.parse(incidentsJson);
 
