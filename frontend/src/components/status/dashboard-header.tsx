@@ -76,6 +76,7 @@ export function DashboardHeader({
               variant="ghost"
               size="icon"
               onClick={onToggleLayout}
+              aria-label={layoutMode === "grid" ? "Switch to classic layout" : "Switch to pulse grid"}
               aria-pressed={layoutMode === "grid"}
               title={layoutMode === "grid" ? "Switch to classic layout" : "Switch to pulse grid"}
               className={cn(
@@ -90,6 +91,7 @@ export function DashboardHeader({
               variant="ghost"
               size="icon"
               onClick={onRefresh}
+              aria-label="Refresh status data"
               disabled={isRefreshing}
               title="Refresh status data"
               className="rounded-full border border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.08] hover:text-white"

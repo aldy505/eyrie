@@ -360,7 +360,7 @@ function ClassicMonitorCard({
               </div>
               <div className="min-w-0 w-full space-y-2 text-sm text-slate-300 lg:max-w-xl lg:flex-1">
                 <p className="break-words font-medium text-white">{incident?.reason || "No active incident."}</p>
-                {incident?.affected_regions.length ? (
+                {incident?.affected_regions?.length ? (
                   <p className="break-words">Affected regions: {incident.affected_regions.join(", ")}</p>
                 ) : (
                   <p>All reporting regions are healthy.</p>
