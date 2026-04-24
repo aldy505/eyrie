@@ -8,6 +8,7 @@ import {
   getSummaryStats,
   incidentsSchema,
   metadataSchema,
+  normalizeUptimeData,
   regionSchema,
   type IncidentsData,
   type Incident,
@@ -35,7 +36,7 @@ function App() {
       fetch(`${BASE_URL}/monitor-incidents`).then((response) => response.json()),
     ])
       .then(([uptimeJson, configJson, incidentsJson]) => {
-        const parsedData = uptimeDataSchema.parse(uptimeJson);
+        const parsedData = normalizeUptimeData(uptimeDataSchema.parse(uptimeJson));
         const parsedMetadata = metadataSchema.parse(configJson);
         const parsedIncidents = incidentsSchema.parse(incidentsJson);
 

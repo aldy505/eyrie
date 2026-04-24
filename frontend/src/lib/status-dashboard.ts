@@ -1,5 +1,19 @@
 import { z } from "zod";
 
+const singleMonitorSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullish(),
+  response_time_ms: z.number(),
+  age: z.number(),
+  downtimes: z.record(
+    z.string(),
+    z.object({
+      duration_minutes: z.number(),
+    }),
+  ),
+});
+
 export const uptimeDataSchema = z.object({
   last_updated: z.coerce.date(),
   monitors: z.array(
@@ -8,21 +22,7 @@ export const uptimeDataSchema = z.object({
       id: z.string(),
       name: z.string(),
       description: z.string().nullish(),
-      monitors: z.array(
-        z.object({
-          id: z.string(),
-          name: z.string(),
-          description: z.string().nullish(),
-          response_time_ms: z.number(),
-          age: z.number(),
-          downtimes: z.record(
-            z.string(),
-            z.object({
-              duration_minutes: z.number(),
-            }),
-          ),
-        }),
-      ),
+      monitors: z.array(singleMonitorSchema.nullable()),
     }),
   ),
 });
@@ -74,12 +74,22 @@ export const regionSchema = z.object({
   ),
 });
 
-export type UptimeData = z.infer<typeof uptimeDataSchema>;
+type RawUptimeData = z.infer<typeof uptimeDataSchema>;
 export type Metadata = z.infer<typeof metadataSchema>;
 export type IncidentsData = z.infer<typeof incidentsSchema>;
 export type RegionData = z.infer<typeof regionSchema>;
+export type SingleMonitor = z.infer<typeof singleMonitorSchema>;
+export type UptimeData = {
+  last_updated: RawUptimeData["last_updated"];
+  monitors: Array<{
+    type: RawUptimeData["monitors"][number]["type"];
+    id: string;
+    name: string;
+    description?: string | null;
+    monitors: SingleMonitor[];
+  }>;
+};
 export type MonitorGroup = UptimeData["monitors"][number];
-export type SingleMonitor = MonitorGroup["monitors"][number];
 export type Incident = IncidentsData["incidents"][number];
 export type AvailabilityStatus = "healthy" | "degraded" | "down";
 export type DashboardLayoutMode = "classic" | "grid";
@@ -118,6 +128,16 @@ export const scopeTone: Record<string, string> = {
   local: "bg-sky-500/15 text-sky-200 ring-1 ring-sky-400/20",
   global: "bg-fuchsia-500/15 text-fuchsia-200 ring-1 ring-fuchsia-400/20",
 };
+
+export function normalizeUptimeData(data: RawUptimeData): UptimeData {
+  return {
+    last_updated: data.last_updated,
+    monitors: data.monitors.map((group) => ({
+      ...group,
+      monitors: group.monitors.filter((monitor): monitor is SingleMonitor => monitor !== null),
+    })),
+  };
+}
 
 export function formatStatus(status: string) {
   return status.charAt(0).toUpperCase() + status.slice(1);
