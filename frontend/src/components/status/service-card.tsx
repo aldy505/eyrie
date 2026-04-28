@@ -13,8 +13,20 @@ export function ServiceCard({ service, metadata }: ServiceCardProps) {
   const probeType = (service.incident?.probe_type ?? "http").toUpperCase();
   const secondaryLine = service.monitor.description || service.monitor.id;
 
+  const bgClass = {
+    healthy: "bg-[#0d1117]",
+    degraded: "bg-amber-500/10",
+    down: "bg-rose-500/10",
+  }[status];
+
+  const borderClass = {
+    healthy: "border-white/10",
+    degraded: "border-amber-400/20",
+    down: "border-rose-400/20",
+  }[status];
+
   return (
-    <article className="flex min-h-[290px] flex-col rounded-[24px] border border-white/10 bg-[#0d1117] p-5 shadow-[0_20px_50px_-35px_rgba(0,0,0,0.85)] transition-colors hover:border-white/15">
+    <article className={`flex min-h-[290px] flex-col rounded-[24px] border ${borderClass} ${bgClass} p-5 shadow-[0_20px_50px_-35px_rgba(0,0,0,0.85)] transition-colors hover:border-white/15`}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h2 className="break-words text-[15px] font-medium text-white">{service.monitor.name}</h2>

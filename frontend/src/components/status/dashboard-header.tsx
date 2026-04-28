@@ -1,5 +1,6 @@
 import { Activity, Radar, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useAutoRefresh } from "@/hooks/use-auto-refresh";
 import type {
   DashboardLayoutMode,
   Metadata,
@@ -37,6 +38,7 @@ export function DashboardHeader({
   onRefresh,
   onToggleLayout,
 }: DashboardHeaderProps) {
+  const { isAutoRefreshEnabled, handleRefreshClick } = useAutoRefresh(onRefresh);
   const subtitle =
     layoutMode === "grid"
       ? "Dense pulse view for large monitor fleets."
@@ -90,11 +92,14 @@ export function DashboardHeader({
               type="button"
               variant="ghost"
               size="icon"
-              onClick={onRefresh}
-              aria-label="Refresh status data"
+              onClick={handleRefreshClick}
+              aria-label={isAutoRefreshEnabled ? "Auto-refresh enabled, click to disable" : "Refresh status data (double-click for auto-refresh)"}
               disabled={isRefreshing}
-              title="Refresh status data"
-              className="rounded-full border border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.08] hover:text-white"
+              title={isAutoRefreshEnabled ? "Auto-refresh enabled (double-click to disable)" : "Single-click to refresh, double-click for auto-refresh"}
+              className={cn(
+                "rounded-full border border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.08] hover:text-white transition-colors",
+                isAutoRefreshEnabled && "border-sky-400/30 bg-sky-500/10 text-sky-200",
+              )}
             >
               <RefreshCw className={cn("h-4 w-4", isRefreshing && "animate-spin")} />
             </Button>
