@@ -464,7 +464,7 @@ export function ClassicStatusList({
   regionMap,
 }: ClassicStatusListProps) {
   return (
-    <section className="space-y-6">
+    <section className="space-y-6 px-6 sm:px-8 xl:px-10">
       {monitors.map((monitor) => (
         <ClassicMonitorCard
           key={monitor.id}

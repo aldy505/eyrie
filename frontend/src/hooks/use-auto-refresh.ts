@@ -77,6 +77,10 @@ export function useAutoRefresh(onRefresh: () => void, isRefreshing = false) {
     }
   }, []);
 
+  const toggleAutoRefresh = useCallback(() => {
+    setIsAutoRefreshEnabled((prev) => !prev);
+  }, []);
+
   // Cleanup pending timers on unmount
   useEffect(() => {
     return () => {
@@ -87,6 +91,6 @@ export function useAutoRefresh(onRefresh: () => void, isRefreshing = false) {
     };
   }, []);
 
-  return { isAutoRefreshEnabled, handleRefreshClick };
+  return { isAutoRefreshEnabled, handleRefreshClick, toggleAutoRefresh };
 }
 

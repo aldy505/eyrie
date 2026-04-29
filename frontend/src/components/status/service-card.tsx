@@ -8,25 +8,27 @@ type ServiceCardProps = {
   metadata: Metadata;
 };
 
+const STATUS_BG_CLASSES = {
+  healthy: "bg-[#0d1117]",
+  degraded: "bg-amber-500/10",
+  down: "bg-rose-500/10",
+} as const;
+
+const STATUS_BORDER_CLASSES = {
+  healthy: "border-white/10",
+  degraded: "border-amber-400/20",
+  down: "border-rose-400/20",
+} as const;
+
+type IncidentStatus = keyof typeof STATUS_BG_CLASSES;
+
 export function ServiceCard({ service, metadata }: ServiceCardProps) {
-  const status = (service.incident?.status ?? "healthy") as keyof typeof bgClasses;
+  const status: IncidentStatus = (service.incident?.status ?? "healthy") as IncidentStatus;
   const probeType = (service.incident?.probe_type ?? "http").toUpperCase();
   const secondaryLine = service.monitor.description || service.monitor.id;
 
-  const bgClasses = {
-    healthy: "bg-[#0d1117]",
-    degraded: "bg-amber-500/10",
-    down: "bg-rose-500/10",
-  };
-
-  const borderClasses = {
-    healthy: "border-white/10",
-    degraded: "border-amber-400/20",
-    down: "border-rose-400/20",
-  };
-
-  const bgClass = bgClasses[status] ?? bgClasses.healthy;
-  const borderClass = borderClasses[status] ?? borderClasses.healthy;
+  const bgClass = STATUS_BG_CLASSES[status] ?? STATUS_BG_CLASSES.healthy;
+  const borderClass = STATUS_BORDER_CLASSES[status] ?? STATUS_BORDER_CLASSES.healthy;
 
   return (
     <article className={`flex min-h-[290px] flex-col rounded-[24px] border ${borderClass} ${bgClass} p-5 shadow-[0_20px_50px_-35px_rgba(0,0,0,0.85)] transition-colors hover:border-white/15`}>
