@@ -38,7 +38,7 @@ export function DashboardHeader({
   onRefresh,
   onToggleLayout,
 }: DashboardHeaderProps) {
-  const { isAutoRefreshEnabled, handleRefreshClick } = useAutoRefresh(onRefresh);
+  const { isAutoRefreshEnabled, handleRefreshClick } = useAutoRefresh(onRefresh, isRefreshing);
   const subtitle =
     layoutMode === "grid"
       ? "Dense pulse view for large monitor fleets."
@@ -93,7 +93,7 @@ export function DashboardHeader({
               variant="ghost"
               size="icon"
               onClick={handleRefreshClick}
-              aria-label={isAutoRefreshEnabled ? "Auto-refresh enabled, click to disable" : "Refresh status data (double-click for auto-refresh)"}
+              aria-label={isAutoRefreshEnabled ? "Auto-refresh enabled (double-click to disable)" : "Single-click to refresh, double-click for auto-refresh"}
               disabled={isRefreshing}
               title={isAutoRefreshEnabled ? "Auto-refresh enabled (double-click to disable)" : "Single-click to refresh, double-click for auto-refresh"}
               className={cn(

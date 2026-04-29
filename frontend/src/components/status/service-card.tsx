@@ -9,21 +9,24 @@ type ServiceCardProps = {
 };
 
 export function ServiceCard({ service, metadata }: ServiceCardProps) {
-  const status = service.incident?.status ?? "healthy";
+  const status = (service.incident?.status ?? "healthy") as keyof typeof bgClasses;
   const probeType = (service.incident?.probe_type ?? "http").toUpperCase();
   const secondaryLine = service.monitor.description || service.monitor.id;
 
-  const bgClass = {
+  const bgClasses = {
     healthy: "bg-[#0d1117]",
     degraded: "bg-amber-500/10",
     down: "bg-rose-500/10",
-  }[status];
+  };
 
-  const borderClass = {
+  const borderClasses = {
     healthy: "border-white/10",
     degraded: "border-amber-400/20",
     down: "border-rose-400/20",
-  }[status];
+  };
+
+  const bgClass = bgClasses[status] ?? bgClasses.healthy;
+  const borderClass = borderClasses[status] ?? borderClasses.healthy;
 
   return (
     <article className={`flex min-h-[290px] flex-col rounded-[24px] border ${borderClass} ${bgClass} p-5 shadow-[0_20px_50px_-35px_rgba(0,0,0,0.85)] transition-colors hover:border-white/15`}>
