@@ -22,6 +22,7 @@ import {
   formatFailureReasonsBreakdown,
   formatScope,
   formatStatus,
+  formatDowntime,
   friendlyFailureReasonName,
   getAvailabilityBarColor,
   getAvailabilityRatio,
@@ -77,7 +78,7 @@ function ClassicUptimeBars({ monitor, metadata }: { monitor: SingleMonitor; meta
           const title = [
             formatStatus(availabilityStatus),
             `Availability: ${formatAvailability(availabilityRatio)}`,
-            `Downtime: ${downtimeMinutes} minutes`,
+            `Downtime: ${formatDowntime(downtimeMinutes)}`,
           ].join(" • ");
 
           return (
