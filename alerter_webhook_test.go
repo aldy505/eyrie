@@ -101,6 +101,21 @@ func TestProviderPayloadBuilders(t *testing.T) {
 	})
 }
 
+func TestBuildNtfyTitle(t *testing.T) {
+	alert := AlertMessage{
+		Name:   "API Gateway",
+		Status: MonitorStatusDown,
+	}
+
+	if got := buildNtfyTitle(alert); got != "API Gateway" {
+		t.Fatalf("unexpected ntfy title %q", got)
+	}
+
+	if got := buildNtfyTitle(AlertMessage{Status: MonitorStatusDown}); got != "[DOWN]" {
+		t.Fatalf("expected fallback title when name is missing, got %q", got)
+	}
+}
+
 func TestWebhookAlerterSendAddsParityHeaders(t *testing.T) {
 	type capturedRequest struct {
 		headers http.Header

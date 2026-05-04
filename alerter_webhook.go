@@ -106,7 +106,7 @@ func (a NtfyAlerter) Send(ctx context.Context, alert AlertMessage) error {
 	}
 	request.Header.Set("User-Agent", "eyrie-ntfy/1.0")
 	presentation := buildAlertPresentation(alert)
-	request.Header.Set("Title", presentation.Title)
+	request.Header.Set("Title", buildNtfyTitle(alert))
 	request.Header.Set("Priority", presentation.Priority)
 	request.Header.Set("Tags", strings.Join(presentation.Tags, ","))
 	if a.accessToken != "" {
@@ -189,6 +189,14 @@ func buildAlertPresentation(alert AlertMessage) AlertPresentation {
 	}
 
 	return presentation
+}
+
+func buildNtfyTitle(alert AlertMessage) string {
+	if alert.Name == "" {
+		return strings.TrimSpace(buildAlertPresentation(alert).Title)
+	}
+
+	return alert.Name
 }
 
 func formatProviderAlertMessage(alert AlertMessage) string {
