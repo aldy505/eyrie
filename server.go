@@ -160,21 +160,21 @@ type UptimeDataByRegionResponse struct {
 }
 
 type MonitorIncidentSummary struct {
-	MonitorID                  string              `json:"monitor_id"`
-	Name                       string              `json:"name"`
-	ProbeType                  string              `json:"probe_type"`
-	Status                     string              `json:"status"`
-	Scope                      string              `json:"scope"`
-	Reason                     string              `json:"reason"`
-	AffectedRegions            []string            `json:"affected_regions"`
-	FailureReasonsBreakdown    map[string][]string `json:"failure_reasons_breakdown,omitempty"`
-	LastTransitionAt           time.Time           `json:"last_transition_at"`
-	UpdatedAt                  time.Time           `json:"updated_at"`
-	IncidentID                 string              `json:"incident_id,omitempty"`
-	IncidentSource             string              `json:"incident_source,omitempty"`
-	IncidentLifecycleState     string              `json:"incident_lifecycle_state,omitempty"`
-	IncidentImpact             string              `json:"incident_impact,omitempty"`
-	IncidentTitle              string              `json:"incident_title,omitempty"`
+	MonitorID               string              `json:"monitor_id"`
+	Name                    string              `json:"name"`
+	ProbeType               string              `json:"probe_type"`
+	Status                  string              `json:"status"`
+	Scope                   string              `json:"scope"`
+	Reason                  string              `json:"reason"`
+	AffectedRegions         []string            `json:"affected_regions"`
+	FailureReasonsBreakdown map[string][]string `json:"failure_reasons_breakdown,omitempty"`
+	LastTransitionAt        time.Time           `json:"last_transition_at"`
+	UpdatedAt               time.Time           `json:"updated_at"`
+	IncidentID              string              `json:"incident_id,omitempty"`
+	IncidentSource          string              `json:"incident_source,omitempty"`
+	IncidentLifecycleState  string              `json:"incident_lifecycle_state,omitempty"`
+	IncidentImpact          string              `json:"incident_impact,omitempty"`
+	IncidentTitle           string              `json:"incident_title,omitempty"`
 }
 
 type MonitorIncidentsResponse struct {
@@ -1079,20 +1079,22 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 }
 
 type ConfigHandlerResponse struct {
-	Title                    string `json:"title"`
-	ShowLastUpdated          bool   `json:"show_last_updated"`
-	RetentionDays            int    `json:"retention_days"`
-	DegradedThresholdMinutes int    `json:"degraded_threshold_minutes"`
-	FailureThresholdMinutes  int    `json:"failure_threshold_minutes"`
+	Title                               string `json:"title"`
+	ShowLastUpdated                     bool   `json:"show_last_updated"`
+	RetentionDays                       int    `json:"retention_days"`
+	DegradedThresholdMinutes            int    `json:"degraded_threshold_minutes"`
+	DegradedThresholdConsecutiveBuckets int    `json:"degraded_threshold_consecutive_buckets"`
+	FailureThresholdMinutes             int    `json:"failure_threshold_minutes"`
 }
 
 func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	response := ConfigHandlerResponse{
-		Title:                    s.serverConfig.Metadata.Title,
-		ShowLastUpdated:          s.serverConfig.Metadata.ShowLastUpdated,
-		RetentionDays:            s.serverConfig.Dataset.RetentionDays,
-		DegradedThresholdMinutes: s.serverConfig.Dataset.DegradedThresholdMinutes,
-		FailureThresholdMinutes:  s.serverConfig.Dataset.FailureThresholdMinutes,
+		Title:                               s.serverConfig.Metadata.Title,
+		ShowLastUpdated:                     s.serverConfig.Metadata.ShowLastUpdated,
+		RetentionDays:                       s.serverConfig.Dataset.RetentionDays,
+		DegradedThresholdMinutes:            s.serverConfig.Dataset.DegradedThresholdMinutes,
+		DegradedThresholdConsecutiveBuckets: s.serverConfig.Dataset.DegradedThresholdConsecutiveBuckets,
+		FailureThresholdMinutes:             s.serverConfig.Dataset.FailureThresholdMinutes,
 	}
 
 	w.Header().Set("content-type", "application/json")

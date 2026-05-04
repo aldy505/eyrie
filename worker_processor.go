@@ -320,61 +320,124 @@ func (w *ProcessorWorker) evaluateLatestIncident(buckets map[time.Time]Submissio
 		return HealthyIncidentEvaluation()
 	}
 
+	latestBucketTime, latestBucket, found := latestNonEmptyBucket(buckets, latestTime, earliestTime, minuteInterval)
+	if !found {
+		return HealthyIncidentEvaluation()
+	}
+
+	failedRegions := failedRegionsFromBucket(latestBucket)
+	if len(failedRegions) == 0 {
+		return HealthyIncidentEvaluation()
+	}
+
+	// Build failure reasons breakdown for the latest failing bucket.
+	reasonsBreakdown := w.buildFailureReasonsBreakdown(buckets, submissions, latestBucketTime, earliestTime, minuteInterval)
+	evaluation := w.evaluateBucketIncident(latestBucket, failedRegions, reasonsBreakdown)
+	if evaluation.Status == MonitorStatusDegraded && evaluation.Scope == MonitorScopeLocal && !w.shouldPromoteLocalDegraded(buckets, latestBucketTime, earliestTime, minuteInterval) {
+		return HealthyIncidentEvaluation()
+	}
+
+	return evaluation
+}
+
+func latestNonEmptyBucket(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (time.Time, SubmissionBucket, bool) {
 	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
 		bucket, ok := buckets[t]
 		if !ok || bucket.TotalCount == 0 {
 			continue
 		}
+		return t, bucket, true
+	}
 
-		failedRegions := make([]string, 0, len(bucket.Regions))
-		for region, success := range bucket.Regions {
-			if !success {
-				failedRegions = append(failedRegions, region)
-			}
+	return time.Time{}, SubmissionBucket{}, false
+}
+
+func failedRegionsFromBucket(bucket SubmissionBucket) []string {
+	failedRegions := make([]string, 0, len(bucket.Regions))
+	for region, success := range bucket.Regions {
+		if !success {
+			failedRegions = append(failedRegions, region)
 		}
-		slices.Sort(failedRegions)
+	}
+	slices.Sort(failedRegions)
+	return failedRegions
+}
 
-		if len(failedRegions) == 0 {
-			return HealthyIncidentEvaluation()
+func (w *ProcessorWorker) evaluateBucketIncident(bucket SubmissionBucket, failedRegions []string, reasonsBreakdown map[string][]string) IncidentEvaluation {
+	if len(failedRegions) == 0 || bucket.TotalCount == 0 {
+		return HealthyIncidentEvaluation()
+	}
+
+	failureRate := float64(len(failedRegions)) / float64(bucket.TotalCount)
+	switch {
+	case bucket.TotalCount == len(failedRegions):
+		scope := MonitorScopeLocal
+		if bucket.TotalCount > 1 {
+			scope = MonitorScopeGlobal
+		}
+		return IncidentEvaluation{
+			Status:                  MonitorStatusDown,
+			Scope:                   scope,
+			Reason:                  fmt.Sprintf("Probe failures detected in all reporting regions (%s)", strings.Join(failedRegions, ", ")),
+			AffectedRegions:         failedRegions,
+			FailureReasonsBreakdown: reasonsBreakdown,
+		}
+	case bucket.TotalCount > 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0:
+		return IncidentEvaluation{
+			Status:                  MonitorStatusDown,
+			Scope:                   MonitorScopeGlobal,
+			Reason:                  fmt.Sprintf("Multi-region outage detected across %d/%d regions (%s)", len(failedRegions), bucket.TotalCount, strings.Join(failedRegions, ", ")),
+			AffectedRegions:         failedRegions,
+			FailureReasonsBreakdown: reasonsBreakdown,
+		}
+	default:
+		return IncidentEvaluation{
+			Status:                  MonitorStatusDegraded,
+			Scope:                   MonitorScopeLocal,
+			Reason:                  fmt.Sprintf("Regional degradation detected in %s", strings.Join(failedRegions, ", ")),
+			AffectedRegions:         failedRegions,
+			FailureReasonsBreakdown: reasonsBreakdown,
+		}
+	}
+}
+
+func (w *ProcessorWorker) shouldPromoteLocalDegraded(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) bool {
+	if earliestTime.After(latestTime) || minuteInterval <= 0 {
+		return false
+	}
+
+	consecutiveThreshold := w.datasetConfig.DegradedThresholdConsecutiveBuckets
+	durationThreshold := time.Duration(w.datasetConfig.DegradedThresholdMinutes) * time.Minute
+	if consecutiveThreshold <= 0 && durationThreshold <= 0 {
+		return true
+	}
+
+	streakCount := 0
+	var streakStart time.Time
+	for t := latestTime; !t.Before(earliestTime); t = t.Add(-minuteInterval) {
+		bucket, ok := buckets[t]
+		if !ok || bucket.TotalCount == 0 {
+			break
 		}
 
-		// Build failure reasons breakdown for this incident
-		reasonsBreakdown := w.buildFailureReasonsBreakdown(buckets, submissions, latestTime, earliestTime, minuteInterval)
+		evaluation := w.evaluateBucketIncident(bucket, failedRegionsFromBucket(bucket), nil)
+		if evaluation.Status != MonitorStatusDegraded || evaluation.Scope != MonitorScopeLocal {
+			break
+		}
 
-		failureRate := float64(len(failedRegions)) / float64(bucket.TotalCount)
-		switch {
-		case bucket.TotalCount == len(failedRegions):
-			scope := MonitorScopeLocal
-			if bucket.TotalCount > 1 {
-				scope = MonitorScopeGlobal
-			}
-			return IncidentEvaluation{
-				Status:                  MonitorStatusDown,
-				Scope:                   scope,
-				Reason:                  fmt.Sprintf("Probe failures detected in all reporting regions (%s)", strings.Join(failedRegions, ", ")),
-				AffectedRegions:         failedRegions,
-				FailureReasonsBreakdown: reasonsBreakdown,
-			}
-		case bucket.TotalCount > 1 && failureRate >= w.datasetConfig.FailureThresholdPercent/100.0:
-			return IncidentEvaluation{
-				Status:                  MonitorStatusDown,
-				Scope:                   MonitorScopeGlobal,
-				Reason:                  fmt.Sprintf("Multi-region outage detected across %d/%d regions (%s)", len(failedRegions), bucket.TotalCount, strings.Join(failedRegions, ", ")),
-				AffectedRegions:         failedRegions,
-				FailureReasonsBreakdown: reasonsBreakdown,
-			}
-		default:
-			return IncidentEvaluation{
-				Status:                  MonitorStatusDegraded,
-				Scope:                   MonitorScopeLocal,
-				Reason:                  fmt.Sprintf("Regional degradation detected in %s", strings.Join(failedRegions, ", ")),
-				AffectedRegions:         failedRegions,
-				FailureReasonsBreakdown: reasonsBreakdown,
-			}
+		streakCount++
+		streakStart = t
+
+		if consecutiveThreshold > 0 && streakCount >= consecutiveThreshold {
+			return true
+		}
+
+		if durationThreshold > 0 && latestTime.Sub(streakStart)+minuteInterval >= durationThreshold {
+			return true
 		}
 	}
 
-	return HealthyIncidentEvaluation()
+	return false
 }
 
 func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBucket, latestTime time.Time, earliestTime time.Time, minuteInterval time.Duration) (bool, string, error) {

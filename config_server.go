@@ -6,12 +6,13 @@ import (
 )
 
 type DatasetConfig struct {
-	RetentionDays                    int     `yaml:"retention_days" default:"90"`
-	ProcessingLookbackMinutes        int     `yaml:"processing_lookback_minutes" default:"10"`
-	PerRegionFailureThresholdPercent float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
-	FailureThresholdPercent          float64 `yaml:"failure_threshold_percent" default:"50.0"`
-	DegradedThresholdMinutes         int     `yaml:"degraded_threshold_minutes" default:"10"`
-	FailureThresholdMinutes          int     `yaml:"failure_threshold_minutes" default:"15"`
+	RetentionDays                       int     `yaml:"retention_days" default:"90"`
+	ProcessingLookbackMinutes           int     `yaml:"processing_lookback_minutes" default:"10"`
+	PerRegionFailureThresholdPercent    float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
+	FailureThresholdPercent             float64 `yaml:"failure_threshold_percent" default:"50.0"`
+	DegradedThresholdMinutes            int     `yaml:"degraded_threshold_minutes" default:"10"`
+	DegradedThresholdConsecutiveBuckets int     `yaml:"degraded_threshold_consecutive_buckets" default:"5"`
+	FailureThresholdMinutes             int     `yaml:"failure_threshold_minutes" default:"15"`
 }
 
 type WebhookAlertingConfig struct {
@@ -42,7 +43,6 @@ type NtfyAlertingConfig struct {
 	AccessToken string `yaml:"access_token"`
 	Username    string `yaml:"username"`
 	Password    string `yaml:"password"`
-	Priority    int    `yaml:"priority" default:"3"`
 }
 
 type RegisteredChecker struct {
