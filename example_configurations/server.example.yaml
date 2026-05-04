@@ -44,6 +44,7 @@ dataset:
   per_region_failure_threshold_percent: 40
   failure_threshold_percent: 50
   degraded_threshold_minutes: 10
+  degraded_threshold_consecutive_buckets: 5
   failure_threshold_minutes: 15
 
 alerting:
@@ -66,7 +67,6 @@ alerting:
     enabled: false
     topic_url: "https://ntfy.sh/eyrie-alerts"
     access_token: "ntfy-access-token"
-    priority: 4
 
 sentry:
   dsn: ""

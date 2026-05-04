@@ -22,6 +22,13 @@ type WebhookAlerter struct {
 	customHeaders map[string]string
 }
 
+type AlertPresentation struct {
+	Title      string
+	Priority   string
+	StatusIcon string
+	Tags       []string
+}
+
 func NewWebhookAlerter(webhookURL, hmacSecret string, customHeaders map[string]string) *WebhookAlerter {
 	return &WebhookAlerter{
 		webhookURL:    webhookURL,
@@ -44,8 +51,12 @@ func (w *WebhookAlerter) Send(ctx context.Context, alert AlertMessage) error {
 	if err != nil {
 		return err
 	}
+	presentation := buildAlertPresentation(alert)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("User-Agent", "eyrie-webhook/1.0")
+	request.Header.Set("X-Eyrie-Alert-Title", presentation.Title)
+	request.Header.Set("X-Eyrie-Alert-Priority", presentation.Priority)
+	request.Header.Set("X-Eyrie-Alert-Tags", strings.Join(presentation.Tags, ","))
 	for key, value := range w.customHeaders {
 		request.Header.Set(key, value)
 	}
@@ -86,7 +97,6 @@ type NtfyAlerter struct {
 	accessToken string
 	username    string
 	password    string
-	priority    int
 }
 
 func (a NtfyAlerter) Send(ctx context.Context, alert AlertMessage) error {
@@ -95,9 +105,10 @@ func (a NtfyAlerter) Send(ctx context.Context, alert AlertMessage) error {
 		return err
 	}
 	request.Header.Set("User-Agent", "eyrie-ntfy/1.0")
-	request.Header.Set("Title", fmt.Sprintf("[%s] %s", strings.ToUpper(alert.Status), alert.Name))
-	request.Header.Set("Priority", fmt.Sprintf("%d", a.priority))
-	request.Header.Set("Tags", strings.Join(alert.AffectedRegions, ","))
+	presentation := buildAlertPresentation(alert)
+	request.Header.Set("Title", presentation.Title)
+	request.Header.Set("Priority", presentation.Priority)
+	request.Header.Set("Tags", strings.Join(presentation.Tags, ","))
 	if a.accessToken != "" {
 		request.Header.Set("Authorization", "Bearer "+a.accessToken)
 	}
@@ -117,9 +128,7 @@ func BuildAlerters(config ServerConfig) []Alerter {
 			url:         config.Alerting.Slack.WebhookURL,
 			userAgent:   "eyrie-slack/1.0",
 			contentType: "application/json",
-			buildBody: func(alert AlertMessage) ([]byte, error) {
-				return json.Marshal(map[string]string{"text": formatAlertMessage(alert)})
-			},
+			buildBody:   buildSlackBody,
 		})
 	}
 	if config.Alerting.Discord.Enabled && config.Alerting.Discord.WebhookURL != "" {
@@ -127,9 +136,7 @@ func BuildAlerters(config ServerConfig) []Alerter {
 			url:         config.Alerting.Discord.WebhookURL,
 			userAgent:   "eyrie-discord/1.0",
 			contentType: "application/json",
-			buildBody: func(alert AlertMessage) ([]byte, error) {
-				return json.Marshal(map[string]string{"content": formatAlertMessage(alert)})
-			},
+			buildBody:   buildDiscordBody,
 		})
 	}
 	if config.Alerting.Teams.Enabled && config.Alerting.Teams.WebhookURL != "" {
@@ -137,9 +144,7 @@ func BuildAlerters(config ServerConfig) []Alerter {
 			url:         config.Alerting.Teams.WebhookURL,
 			userAgent:   "eyrie-teams/1.0",
 			contentType: "application/json",
-			buildBody: func(alert AlertMessage) ([]byte, error) {
-				return json.Marshal(map[string]string{"text": formatAlertMessage(alert)})
-			},
+			buildBody:   buildTeamsBody,
 		})
 	}
 	if config.Alerting.Ntfy.Enabled && config.Alerting.Ntfy.TopicURL != "" {
@@ -148,10 +153,67 @@ func BuildAlerters(config ServerConfig) []Alerter {
 			accessToken: config.Alerting.Ntfy.AccessToken,
 			username:    config.Alerting.Ntfy.Username,
 			password:    config.Alerting.Ntfy.Password,
-			priority:    max(config.Alerting.Ntfy.Priority, 1),
 		})
 	}
 	return alerters
+}
+
+func buildAlertPresentation(alert AlertMessage) AlertPresentation {
+	status := "healthy"
+	if alert.Status != "" {
+		status = strings.ToLower(alert.Status)
+	}
+
+	presentation := AlertPresentation{
+		Title:    fmt.Sprintf("[%s] %s", strings.ToUpper(status), alert.Name),
+		Priority: "default",
+	}
+
+	switch status {
+	case MonitorStatusHealthy:
+		presentation.Priority = "low"
+		presentation.StatusIcon = "🟩"
+		presentation.Tags = append(presentation.Tags, "green_square")
+	case MonitorStatusDegraded:
+		presentation.Priority = "default"
+		presentation.StatusIcon = "🟨"
+		presentation.Tags = append(presentation.Tags, "yellow_square")
+	case MonitorStatusDown:
+		presentation.Priority = "high"
+		presentation.StatusIcon = "🟥"
+		presentation.Tags = append(presentation.Tags, "red_square")
+	}
+
+	if len(alert.AffectedRegions) > 0 {
+		presentation.Tags = append(presentation.Tags, alert.AffectedRegions...)
+	}
+
+	return presentation
+}
+
+func formatProviderAlertMessage(alert AlertMessage) string {
+	presentation := buildAlertPresentation(alert)
+	if presentation.StatusIcon == "" {
+		return fmt.Sprintf("%s\n%s", presentation.Title, formatAlertMessage(alert))
+	}
+
+	return fmt.Sprintf("%s %s\n%s", presentation.StatusIcon, presentation.Title, formatAlertMessage(alert))
+}
+
+func buildSlackBody(alert AlertMessage) ([]byte, error) {
+	return json.Marshal(map[string]string{"text": formatProviderAlertMessage(alert)})
+}
+
+func buildDiscordBody(alert AlertMessage) ([]byte, error) {
+	return json.Marshal(map[string]string{"content": formatProviderAlertMessage(alert)})
+}
+
+func buildTeamsBody(alert AlertMessage) ([]byte, error) {
+	presentation := buildAlertPresentation(alert)
+	return json.Marshal(map[string]string{
+		"summary": presentation.Title,
+		"text":    formatProviderAlertMessage(alert),
+	})
 }
 
 func formatAlertMessage(alert AlertMessage) string {
@@ -172,7 +234,7 @@ func formatAlertMessage(alert AlertMessage) string {
 		alert.Name,
 		status,
 		scope,
-		alert.OccurredAt.Format(time.RFC3339),
+		alert.OccurredAt.Format(time.DateTime),
 		regions,
 		alert.Reason,
 	)
