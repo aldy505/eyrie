@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/guregu/null/v5"
 	"github.com/rs/cors"
 	"gocloud.dev/pubsub"
+	"golang.org/x/sync/semaphore"
 )
 
 type Server struct {
@@ -32,6 +34,7 @@ type Server struct {
 	monitorConfig     MonitorConfig
 	processorProducer *pubsub.Topic
 	ingesterProducer  *pubsub.Topic
+	duckDBReadLimiter *semaphore.Weighted
 }
 
 type ServerOptions struct {
@@ -46,12 +49,18 @@ type ServerOptions struct {
 var frontendFilesystem embed.FS
 
 func NewServer(options ServerOptions) (*Server, error) {
+	duckDBReadLimit := resolveDuckDBReadConcurrencyLimit(
+		options.ServerConfig.Database.ReadConcurrencyLimit,
+		runtime.GOMAXPROCS(0),
+	)
+
 	s := &Server{
 		db:                options.Database,
 		serverConfig:      options.ServerConfig,
 		monitorConfig:     options.MonitorConfig,
 		processorProducer: options.ProcessorProducer,
 		ingesterProducer:  options.IngesterProducer,
+		duckDBReadLimiter: semaphore.NewWeighted(duckDBReadLimit),
 	}
 
 	// Create a sub-filesystem rooted at frontend/dist so we can reference index.html directly
@@ -73,9 +82,9 @@ func NewServer(options ServerOptions) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /config", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.ConfigHandler)))
-	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataHandler)))
-	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataByRegionHandler)))
-	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.MonitorIncidentsHandler)))
+	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.UptimeDataHandler))))
+	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.UptimeDataByRegionHandler))))
+	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.MonitorIncidentsHandler))))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
 	mux.Handle("/", SpaHandler(distFS, "index.html"))
@@ -88,6 +97,44 @@ func NewServer(options ServerOptions) (*Server, error) {
 	s.Server = srv
 
 	return s, nil
+}
+
+func resolveDuckDBReadConcurrencyLimit(configured int, gomaxprocs int) int64 {
+	if configured > 0 {
+		return int64(configured)
+	}
+
+	derivedLimit := gomaxprocs / 2
+	if derivedLimit < 1 {
+		derivedLimit = 1
+	}
+
+	return int64(derivedLimit)
+}
+
+func (s *Server) withDuckDBReadPermit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.duckDBReadLimiter == nil {
+			next(w, r)
+			return
+		}
+
+		if err := s.duckDBReadLimiter.Acquire(r.Context(), 1); err != nil {
+			if hub := sentry.GetHubFromContext(r.Context()); hub != nil {
+				hub.CaptureException(fmt.Errorf("acquiring duckdb read permit: %w", err))
+			}
+			slog.WarnContext(r.Context(), "request cancelled while waiting for duckdb read capacity", slog.String("error", err.Error()))
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+				Error: "request cancelled while waiting for database capacity",
+			})
+			return
+		}
+		defer s.duckDBReadLimiter.Release(1)
+
+		next(w, r)
+	}
 }
 
 type CommonErrorResponse struct {

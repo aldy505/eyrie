@@ -21,3 +21,16 @@ func TestServerConfigValidateRejectsDuplicateAPIKeys(t *testing.T) {
 		t.Fatalf("expected duplicate api_key error, got %v", err)
 	}
 }
+
+func TestServerConfigValidateRejectsNegativeReadConcurrencyLimit(t *testing.T) {
+	config := ServerConfig{}
+	config.Database.ReadConcurrencyLimit = -1
+
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("expected read_concurrency_limit validation error")
+	}
+	if !strings.Contains(err.Error(), "database.read_concurrency_limit") {
+		t.Fatalf("expected database.read_concurrency_limit error, got %v", err)
+	}
+}

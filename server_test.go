@@ -10,7 +10,85 @@ import (
 	"time"
 
 	"github.com/guregu/null/v5"
+	"golang.org/x/sync/semaphore"
 )
+
+func TestResolveDuckDBReadConcurrencyLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured int
+		gomaxprocs int
+		want       int64
+	}{
+		{
+			name:       "uses configured limit when set",
+			configured: 7,
+			gomaxprocs: 8,
+			want:       7,
+		},
+		{
+			name:       "derives half of gomaxprocs when unset",
+			configured: 0,
+			gomaxprocs: 8,
+			want:       4,
+		},
+		{
+			name:       "keeps minimum of one permit",
+			configured: 0,
+			gomaxprocs: 1,
+			want:       1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveDuckDBReadConcurrencyLimit(tt.configured, tt.gomaxprocs); got != tt.want {
+				t.Fatalf("resolveDuckDBReadConcurrencyLimit(%d, %d) = %d, want %d", tt.configured, tt.gomaxprocs, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerWithDuckDBReadPermitWaitsForPermit(t *testing.T) {
+	server := &Server{
+		duckDBReadLimiter: semaphore.NewWeighted(1),
+	}
+
+	if err := server.duckDBReadLimiter.Acquire(t.Context(), 1); err != nil {
+		t.Fatalf("failed to acquire initial permit: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/uptime-data", nil)
+	handlerStarted := make(chan struct{})
+	handlerFinished := make(chan struct{})
+
+	go func() {
+		server.withDuckDBReadPermit(func(w http.ResponseWriter, r *http.Request) {
+			close(handlerStarted)
+			w.WriteHeader(http.StatusNoContent)
+		})(recorder, request)
+		close(handlerFinished)
+	}()
+
+	select {
+	case <-handlerStarted:
+		t.Fatal("handler should wait for permit before running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	server.duckDBReadLimiter.Release(1)
+
+	select {
+	case <-handlerFinished:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not complete after permit release")
+	}
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d", http.StatusNoContent, recorder.Code)
+	}
+}
 
 func TestServer_FetchFromAggregateMonitorHistorical(t *testing.T) {
 	monitorID := "test-aggregate-server-monitor"

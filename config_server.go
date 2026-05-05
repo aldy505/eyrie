@@ -72,7 +72,8 @@ type ServerConfig struct {
 	} `yaml:"metadata"`
 	RegisteredCheckers []RegisteredChecker `yaml:"registered_checkers"`
 	Database           struct {
-		Path string `yaml:"path" default:"eyrie.db"`
+		Path                 string `yaml:"path" default:"eyrie.db"`
+		ReadConcurrencyLimit int    `yaml:"read_concurrency_limit" default:"0"`
 	} `yaml:"database"`
 	TaskQueue struct {
 		Processor struct {
@@ -124,6 +125,10 @@ func (c ServerConfig) Validate() error {
 			return fmt.Errorf("registered checker %q: duplicate api_key", checker.EffectiveName())
 		}
 		seenAPIKeys[checker.ApiKey] = struct{}{}
+	}
+
+	if c.Database.ReadConcurrencyLimit < 0 {
+		return fmt.Errorf("database.read_concurrency_limit must be zero or greater")
 	}
 
 	return nil
