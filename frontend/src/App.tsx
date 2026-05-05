@@ -18,6 +18,27 @@ import {
   uptimeDataSchema,
 } from "@/lib/status-dashboard";
 
+const REGION_FETCH_JITTER_MAX_MS = 5000;
+
+async function fetchJson(url: string) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Request failed for ${url}: ${response.status} ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+function getRegionFetchJitterMs() {
+  return Math.floor(Math.random() * (REGION_FETCH_JITTER_MAX_MS + 1));
+}
+
+function waitFor(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function App() {
   const [data, setData] = useState<UptimeData | null>(null);
   const [metadata, setMetadata] = useState<Metadata | null>(null);
@@ -31,9 +52,9 @@ function App() {
     setIsRefreshing(true);
     setError(null);
     Promise.all([
-      fetch(`${BASE_URL}/uptime-data`).then((response) => response.json()),
-      fetch(`${BASE_URL}/config`).then((response) => response.json()),
-      fetch(`${BASE_URL}/monitor-incidents`).then((response) => response.json()),
+      fetchJson(`${BASE_URL}/uptime-data`),
+      fetchJson(`${BASE_URL}/config`),
+      fetchJson(`${BASE_URL}/monitor-incidents`),
     ])
       .then(([uptimeJson, configJson, incidentsJson]) => {
         const parsedData = normalizeUptimeData(uptimeDataSchema.parse(uptimeJson));
@@ -51,18 +72,25 @@ function App() {
           ),
         );
 
-        return Promise.all(
-          uniqueMonitorIds.map((monitorId) =>
-            fetch(`${BASE_URL}/uptime-data-by-region?monitorId=${encodeURIComponent(monitorId)}`)
-              .then((response) => response.json())
-              .then((json) => ({ monitorId, payload: regionSchema.parse(json) })),
-          ),
+        return Promise.allSettled(
+          uniqueMonitorIds.map(async (monitorId) => {
+            await waitFor(getRegionFetchJitterMs());
+            const json = await fetchJson(
+              `${BASE_URL}/uptime-data-by-region?monitorId=${encodeURIComponent(monitorId)}`,
+            );
+            return { monitorId, payload: regionSchema.parse(json) };
+          }),
         );
       })
       .then((regions) => {
         const nextMap: Record<string, RegionData["monitors"]> = {};
         for (const item of regions) {
-          nextMap[item.monitorId] = item.payload.monitors;
+          if (item.status === "fulfilled") {
+            nextMap[item.value.monitorId] = item.value.payload.monitors;
+            continue;
+          }
+
+          console.error("Failed to load region data", item.reason);
         }
         setRegionMap(nextMap);
       })

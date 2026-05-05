@@ -26,6 +26,8 @@ registered_checkers:
 
 database:
   path: "/var/lib/eyrie/database.db"
+  # Optional. When zero or omitted, defaults to max(1, GOMAXPROCS/2).
+  read_concurrency_limit: 0
 
 task_queue:
   processor:
