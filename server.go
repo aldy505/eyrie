@@ -29,12 +29,14 @@ import (
 
 type Server struct {
 	*http.Server
-	db                *sql.DB
-	serverConfig      ServerConfig
-	monitorConfig     MonitorConfig
-	processorProducer *pubsub.Topic
-	ingesterProducer  *pubsub.Topic
-	duckDBReadLimiter *semaphore.Weighted
+	db                                  *sql.DB
+	serverConfig                        ServerConfig
+	monitorConfig                       MonitorConfig
+	processorProducer                   *pubsub.Topic
+	ingesterProducer                    *pubsub.Topic
+	duckDBReadLimiter                   *semaphore.Weighted
+	historicalDailyAggregateCache       *ttlCache[[]MonitorHistoricalDailyAggregate]
+	historicalRegionDailyAggregateCache *ttlCache[[]MonitorHistoricalRegionDailyAggregate]
 }
 
 type ServerOptions struct {
@@ -55,12 +57,14 @@ func NewServer(options ServerOptions) (*Server, error) {
 	)
 
 	s := &Server{
-		db:                options.Database,
-		serverConfig:      options.ServerConfig,
-		monitorConfig:     options.MonitorConfig,
-		processorProducer: options.ProcessorProducer,
-		ingesterProducer:  options.IngesterProducer,
-		duckDBReadLimiter: semaphore.NewWeighted(duckDBReadLimit),
+		db:                                  options.Database,
+		serverConfig:                        options.ServerConfig,
+		monitorConfig:                       options.MonitorConfig,
+		processorProducer:                   options.ProcessorProducer,
+		ingesterProducer:                    options.IngesterProducer,
+		duckDBReadLimiter:                   semaphore.NewWeighted(duckDBReadLimit),
+		historicalDailyAggregateCache:       newTTLCache[[]MonitorHistoricalDailyAggregate](uptimeDataCacheTTL),
+		historicalRegionDailyAggregateCache: newTTLCache[[]MonitorHistoricalRegionDailyAggregate](uptimeDataCacheTTL),
 	}
 
 	// Create a sub-filesystem rooted at frontend/dist so we can reference index.html directly
@@ -110,6 +114,182 @@ func resolveDuckDBReadConcurrencyLimit(configured int, gomaxprocs int) int64 {
 	}
 
 	return int64(derivedLimit)
+}
+
+func aggregateCacheKey(monitorID string, day time.Time) string {
+	return monitorID + ":" + utcDayStart(day).Format("2006-01-02")
+}
+
+func (s *Server) loadHistoricalDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ? AND date < ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(beforeDate).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying historical daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning historical daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) loadHistoricalDailyAggregatesForDate(ctx context.Context, monitorID string, day time.Time) ([]MonitorHistoricalDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ? AND date = ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(day).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying current day daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning current day daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) historicalDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalDailyAggregate, error) {
+	if s.historicalDailyAggregateCache == nil {
+		return s.loadHistoricalDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	}
+
+	key := aggregateCacheKey(monitorID, beforeDate)
+	return s.historicalDailyAggregateCache.getOrLoad(key, func() ([]MonitorHistoricalDailyAggregate, error) {
+		return s.loadHistoricalDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	})
+}
+
+func (s *Server) loadHistoricalRegionDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_region_daily_aggregate
+		WHERE monitor_id = ? AND date < ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(beforeDate).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying historical region daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalRegionDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalRegionDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Region,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning historical region daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) loadHistoricalRegionDailyAggregatesForDate(ctx context.Context, monitorID string, day time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_region_daily_aggregate
+		WHERE monitor_id = ? AND date = ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(day).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying current day region daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalRegionDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalRegionDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Region,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning current day region daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) historicalRegionDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
+	if s.historicalRegionDailyAggregateCache == nil {
+		return s.loadHistoricalRegionDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	}
+
+	key := aggregateCacheKey(monitorID, beforeDate)
+	return s.historicalRegionDailyAggregateCache.getOrLoad(key, func() ([]MonitorHistoricalRegionDailyAggregate, error) {
+		return s.loadHistoricalRegionDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	})
 }
 
 func (s *Server) withDuckDBReadPermit(next http.HandlerFunc) http.HandlerFunc {
@@ -400,76 +580,13 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var monitors []UptimeDataByRegionMonitor
-	for region, historicals := range regionData {
-		// Group each monitor historicals on a daily bucket
-		dailyBucket := make(map[time.Time][]MonitorHistorical)
-		for _, mh := range historicals {
-			year, month, day := mh.CreatedAt.Date()
-			bucketDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-			if _, exists := dailyBucket[bucketDate]; !exists {
-				dailyBucket[bucketDate] = []MonitorHistorical{}
-			}
-			dailyBucket[bucketDate] = append(dailyBucket[bucketDate], mh)
-		}
-
-		var regionMonitor = UptimeDataByRegionMonitor{
-			Region:         region,
-			ResponseTimeMs: 0,
-			Age:            len(dailyBucket),
-			Downtimes: make(map[int]struct {
-				DurationMinutes int `json:"duration_minutes"`
-			}),
-		}
-
-		// Calculate stats for each day
-		for date, dayHistoricals := range dailyBucket {
-			var totalLatency int64 = 0
-			var totalChecks int64 = 0
-			var downtimeMinutes int = 0
-
-			for _, mh := range dayHistoricals {
-				totalLatency += int64(mh.LatencyMs)
-				totalChecks++
-
-				if !monitorConfig.IsSuccessfulStatus(mh.StatusCode, mh.Success) {
-					downtimeMinutes += 1 // assuming each check is done every minute
-				}
-			}
-
-			averageLatency := totalLatency / totalChecks
-			regionMonitor.ResponseTimeMs += averageLatency
-
-			// Calculate downtime index (days ago from now)
-			now := time.Now().UTC()
-			dailyDowntimesIndex := int(now.Sub(date).Hours() / 24)
-			regionMonitor.Downtimes[dailyDowntimesIndex] = struct {
-				DurationMinutes int `json:"duration_minutes"`
-			}{
-				DurationMinutes: downtimeMinutes,
-			}
-		}
-
-		// Calculate overall average latency for this region
-		if len(dailyBucket) > 0 {
-			regionMonitor.ResponseTimeMs = regionMonitor.ResponseTimeMs / int64(len(dailyBucket))
-		}
-
-		monitors = append(monitors, regionMonitor)
-	}
-
-	// Sort monitors by region name for consistent output
-	slices.SortStableFunc(monitors, func(a, b UptimeDataByRegionMonitor) int {
-		return strings.Compare(a.Region, b.Region)
-	})
-
 	response := UptimeDataByRegionResponse{
 		LastUpdated: time.Now(),
 		Metadata: UptimeDataByRegionMetadata{
 			Name:        monitorConfig.Name,
 			Description: monitorConfig.Description,
 		},
-		Monitors: monitors,
+		Monitors: regionData,
 	}
 
 	w.Header().Set("content-type", "application/json")
@@ -805,100 +922,66 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 
 // fetchFromAggregateMonitorHistorical fetches monitor historical data from the aggregate table
 func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
-	const (
-		minutesPerDay   = 1440
-		checksPerMinute = 1
-		checksPerDay    = minutesPerDay * checksPerMinute
-	)
-
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Aggregate Monitor Historical"))
 	ctx = span.Context()
 	defer span.Finish()
 
-	conn, err := s.db.Conn(ctx)
+	today := utcDayStart(time.Now().UTC())
+	historicalAggregates, err := s.historicalDailyAggregatesBeforeDate(ctx, monitorId, today)
 	if err != nil {
-		return UptimeDataHistorical{}, fmt.Errorf("getting db connection: %w", err)
+		return UptimeDataHistorical{}, fmt.Errorf("loading historical aggregate monitor data: %w", err)
 	}
-	defer conn.Close()
 
-	// Query aggregated data
-	rows, err := conn.QueryContext(ctx, `
-		SELECT
-			date,
-			avg_latency_ms,
-			success_rate
-		FROM
-			monitor_historical_daily_aggregate
-		WHERE
-			monitor_id = ?
-		ORDER BY date DESC`,
-		monitorId,
-	)
+	todayAggregates, err := s.loadHistoricalDailyAggregatesForDate(ctx, monitorId, today)
 	if err != nil {
-		return UptimeDataHistorical{}, fmt.Errorf("querying aggregate monitor historical: %w", err)
-	}
-	defer rows.Close()
-
-	var aggregates []MonitorHistoricalDailyAggregate
-	for rows.Next() {
-		var aggregate MonitorHistoricalDailyAggregate
-		if err := rows.Scan(&aggregate.Date, &aggregate.AvgLatencyMs, &aggregate.SuccessRate); err != nil {
-			return UptimeDataHistorical{}, fmt.Errorf("scanning aggregate monitor historical: %w", err)
-		}
-		aggregates = append(aggregates, aggregate)
+		return UptimeDataHistorical{}, fmt.Errorf("loading current day aggregate monitor data: %w", err)
 	}
 
+	aggregates := append(historicalAggregates, todayAggregates...)
 	if len(aggregates) == 0 {
 		return UptimeDataHistorical{}, fmt.Errorf("no aggregate data found for monitor %s", monitorId)
 	}
 
-	var uptimeHistorical = UptimeDataHistorical{
-		LatencyMs:  0,
-		MonitorAge: len(aggregates),
-		DailyDowntimes: make(map[int]struct {
-			DurationMinutes int `json:"duration_minutes"`
-		}),
-	}
-
-	// Calculate average latency and downtime from aggregates
-	var totalLatency int64 = 0
-	now := time.Now().UTC()
-
-	for _, aggregate := range aggregates {
-		totalLatency += int64(aggregate.AvgLatencyMs)
-
-		// Calculate downtime based on success rate
-		// If success rate is 80%, that means 20% downtime
-		// Assuming checks are done every minute, and there are 1440 minutes in a day
-		// downtime_minutes = (100 - success_rate) * 1440 / 100
-		downtimeMinutes := (100 - aggregate.SuccessRate) * minutesPerDay / 100
-
-		// Calculate the index for DailyDowntimes map
-		// The index represents days ago from now
-		// Use date-based calculation to avoid floating-point precision issues
-		year, month, day := aggregate.Date.Date()
-		aggregateDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-		nowYear, nowMonth, nowDay := now.Date()
-		nowDate := time.Date(nowYear, nowMonth, nowDay, 0, 0, 0, 0, time.UTC)
-		dailyDowntimesIndex := int(nowDate.Sub(aggregateDate) / (24 * time.Hour))
-
-		uptimeHistorical.DailyDowntimes[dailyDowntimesIndex] = struct {
-			DurationMinutes int `json:"duration_minutes"`
-		}{
-			DurationMinutes: downtimeMinutes,
-		}
-	}
-
-	// Calculate overall average latency
-	if len(aggregates) > 0 {
-		uptimeHistorical.LatencyMs = totalLatency / int64(len(aggregates))
-	}
-
-	return uptimeHistorical, nil
+	return summarizeUptimeHistoricalAggregates(aggregates), nil
 }
 
-func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, monitorId string) (map[string][]MonitorHistorical, error) {
-	// Fetch monitor historical data grouped by region
+func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, monitorId string) ([]UptimeDataByRegionMonitor, error) {
+	regionData, err := s.fetchMonitorHistoricalGroupedByRegionFromAggregates(ctx, monitorId)
+	if err == nil {
+		return regionData, nil
+	}
+
+	slog.InfoContext(ctx, "falling back to raw monitor historical by region", slog.String("monitor_id", monitorId), slog.String("error", err.Error()))
+
+	rawRegionData, rawErr := s.fetchMonitorHistoricalGroupedByRegionRaw(ctx, monitorId)
+	if rawErr != nil {
+		return nil, rawErr
+	}
+
+	return summarizeUptimeRegionHistoricalRows(rawRegionData), nil
+}
+
+func (s *Server) fetchMonitorHistoricalGroupedByRegionFromAggregates(ctx context.Context, monitorId string) ([]UptimeDataByRegionMonitor, error) {
+	today := utcDayStart(time.Now().UTC())
+	historicalAggregates, err := s.historicalRegionDailyAggregatesBeforeDate(ctx, monitorId, today)
+	if err != nil {
+		return nil, fmt.Errorf("loading historical region aggregate monitor data: %w", err)
+	}
+
+	todayAggregates, err := s.loadHistoricalRegionDailyAggregatesForDate(ctx, monitorId, today)
+	if err != nil {
+		return nil, fmt.Errorf("loading current day region aggregate monitor data: %w", err)
+	}
+
+	aggregates := append(historicalAggregates, todayAggregates...)
+	if len(aggregates) == 0 {
+		return nil, fmt.Errorf("no aggregate data found for monitor %s", monitorId)
+	}
+
+	return summarizeRegionHistoricalAggregates(aggregates), nil
+}
+
+func (s *Server) fetchMonitorHistoricalGroupedByRegionRaw(ctx context.Context, monitorId string) (map[string][]MonitorHistorical, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		if hub := sentry.GetHubFromContext(ctx); hub != nil {
@@ -914,7 +997,6 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 		}
 	}()
 
-	// Query all monitor historical data for this monitor
 	rows, err := conn.QueryContext(ctx, `
 		SELECT
 			region,
@@ -948,7 +1030,6 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
 	}
 
-	// Group by region and calculate stats for each region
 	regionData := make(map[string][]MonitorHistorical)
 	for _, mh := range monitorHistoricals {
 		regionData[mh.Region] = append(regionData[mh.Region], mh)

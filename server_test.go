@@ -325,6 +325,234 @@ func TestServer_FetchFromAggregateMonitorHistoricalUsesExpectedStatusCodes(t *te
 	}
 }
 
+func TestServer_FetchFromAggregateMonitorHistoricalCachesHistoricalRows(t *testing.T) {
+	monitorID := "test-aggregate-server-cache"
+	today := utcDayStart(time.Now().UTC())
+	yesterday := today.AddDate(0, 0, -1)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                "Cache Monitor",
+				ExpectedStatusCodes: []int{200},
+			},
+		},
+	}
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
+	}
+
+	for i := 0; i < 2; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  int64(100 + (i * 100)),
+			StatusCode: 200,
+			Timestamp:  yesterday.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest yesterday monitor historical: %v", err)
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  int64(300 + (i * 100)),
+			StatusCode: 200,
+			Timestamp:  today.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest today monitor historical: %v", err)
+		}
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, yesterday); err != nil {
+		t.Fatalf("failed to aggregate yesterday monitor historical: %v", err)
+	}
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, today); err != nil {
+		t.Fatalf("failed to aggregate today monitor historical: %v", err)
+	}
+
+	server := &Server{
+		db:                            db,
+		serverConfig:                  ServerConfig{},
+		monitorConfig:                 monitorConfig,
+		historicalDailyAggregateCache: newTTLCache[[]MonitorHistoricalDailyAggregate](time.Hour),
+	}
+
+	first, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("failed to fetch from aggregate monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for cache test: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ? AND date = ?`, monitorID, yesterday.Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("failed to delete yesterday aggregate row: %v", err)
+	}
+
+	second, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("expected cached historical aggregates to satisfy second fetch: %v", err)
+	}
+
+	if first.MonitorAge != second.MonitorAge {
+		t.Fatalf("expected cached monitor age %d, got %d", first.MonitorAge, second.MonitorAge)
+	}
+	if first.LatencyMs != second.LatencyMs {
+		t.Fatalf("expected cached latency %d, got %d", first.LatencyMs, second.LatencyMs)
+	}
+	if len(first.DailyDowntimes) != len(second.DailyDowntimes) {
+		t.Fatalf("expected cached downtime count %d, got %d", len(first.DailyDowntimes), len(second.DailyDowntimes))
+	}
+}
+
+func TestServer_FetchFromAggregateMonitorHistoricalRefreshesTodayRows(t *testing.T) {
+	monitorID := "test-aggregate-server-refresh-today"
+	today := utcDayStart(time.Now().UTC())
+	yesterday := today.AddDate(0, 0, -1)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                "Today Refresh Monitor",
+				ExpectedStatusCodes: []int{200},
+			},
+		},
+	}
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
+	}
+
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		LatencyMs:  100,
+		StatusCode: 200,
+		Timestamp:  yesterday,
+		Timings:    CheckerTraceTimings{},
+	}, "us-east-1"); err != nil {
+		t.Fatalf("failed to ingest yesterday monitor historical: %v", err)
+	}
+
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		LatencyMs:  200,
+		StatusCode: 200,
+		Timestamp:  today,
+		Timings:    CheckerTraceTimings{},
+	}, "us-east-1"); err != nil {
+		t.Fatalf("failed to ingest today monitor historical: %v", err)
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, yesterday); err != nil {
+		t.Fatalf("failed to aggregate yesterday monitor historical: %v", err)
+	}
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, today); err != nil {
+		t.Fatalf("failed to aggregate today monitor historical: %v", err)
+	}
+
+	server := &Server{
+		db:                            db,
+		serverConfig:                  ServerConfig{},
+		monitorConfig:                 monitorConfig,
+		historicalDailyAggregateCache: newTTLCache[[]MonitorHistoricalDailyAggregate](time.Hour),
+	}
+
+	first, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("failed to fetch aggregate monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for cache refresh test: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ExecContext(ctx, `
+		UPDATE monitor_historical_daily_aggregate
+		SET avg_latency_ms = ?, success_rate = ?
+		WHERE monitor_id = ? AND date = ?
+	`, 400, 0, monitorID, today.Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("failed to update today's aggregate row: %v", err)
+	}
+
+	second, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("failed to refresh today's aggregate data: %v", err)
+	}
+
+	if first.DailyDowntimes[0].DurationMinutes == second.DailyDowntimes[0].DurationMinutes {
+		t.Fatalf("expected today's downtime to refresh, but it stayed at %d", first.DailyDowntimes[0].DurationMinutes)
+	}
+}
+
 func TestServer_FetchFromRawMonitorHistoricalFallback(t *testing.T) {
 	monitorID := "test-fallback-monitor"
 	testDate := time.Date(2025, 1, 17, 0, 0, 0, 0, time.UTC)
