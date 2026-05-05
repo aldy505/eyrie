@@ -3,6 +3,8 @@ package main
 import (
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type ttlCacheEntry[T any] struct {
@@ -14,6 +16,7 @@ type ttlCache[T any] struct {
 	mu      sync.RWMutex
 	ttl     time.Duration
 	entries map[string]ttlCacheEntry[T]
+	group   singleflight.Group
 }
 
 func newTTLCache[T any](ttl time.Duration) *ttlCache[T] {
@@ -29,17 +32,16 @@ func (c *ttlCache[T]) get(key string) (T, bool) {
 		return zero, false
 	}
 
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	entry, ok := c.entries[key]
-	c.mu.RUnlock()
 	if !ok {
 		return zero, false
 	}
 
 	if time.Now().After(entry.expiresAt) {
-		c.mu.Lock()
 		delete(c.entries, key)
-		c.mu.Unlock()
 		return zero, false
 	}
 
@@ -60,16 +62,31 @@ func (c *ttlCache[T]) set(key string, value T) {
 }
 
 func (c *ttlCache[T]) getOrLoad(key string, loader func() (T, error)) (T, error) {
+	if c == nil {
+		return loader()
+	}
+
 	if value, ok := c.get(key); ok {
 		return value, nil
 	}
 
-	value, err := loader()
+	result, err, _ := c.group.Do(key, func() (any, error) {
+		if value, ok := c.get(key); ok {
+			return value, nil
+		}
+
+		value, err := loader()
+		if err != nil {
+			return nil, err
+		}
+
+		c.set(key, value)
+		return value, nil
+	})
 	if err != nil {
 		var zero T
 		return zero, err
 	}
 
-	c.set(key, value)
-	return value, nil
+	return result.(T), nil
 }

@@ -25,10 +25,11 @@ func summarizeUptimeHistoricalAggregates(rows []MonitorHistoricalDailyAggregate)
 	}
 
 	var totalLatency int64
+	now := time.Now().UTC()
 	for _, row := range rows {
 		summary.MonitorAge++
 		totalLatency += int64(row.AvgLatencyMs)
-		summary.DailyDowntimes[daysAgo(time.Now().UTC(), row.Date)] = struct {
+		summary.DailyDowntimes[daysAgo(now, row.Date)] = struct {
 			DurationMinutes int `json:"duration_minutes"`
 		}{
 			DurationMinutes: (100 - row.SuccessRate) * 1440 / 100,

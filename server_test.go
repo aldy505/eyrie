@@ -553,6 +553,147 @@ func TestServer_FetchFromAggregateMonitorHistoricalRefreshesTodayRows(t *testing
 	}
 }
 
+func TestServer_UptimeDataByRegionHandlerCachesHistoricalAggregates(t *testing.T) {
+	monitorID := "test-region-aggregate-cache"
+	today := utcDayStart(time.Now().UTC())
+	yesterday := today.AddDate(0, 0, -1)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                "Region Cache Monitor",
+				ExpectedStatusCodes: []int{200},
+			},
+		},
+	}
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
+	}
+
+	for _, item := range []struct {
+		date    time.Time
+		latency int64
+		status  int
+	}{
+		{date: yesterday, latency: 100, status: 200},
+		{date: today, latency: 200, status: 200},
+	} {
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  item.latency,
+			StatusCode: item.status,
+			Timestamp:  item.date,
+			Timings:    CheckerTraceTimings{},
+		}, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest monitor historical: %v", err)
+		}
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, yesterday); err != nil {
+		t.Fatalf("failed to aggregate yesterday monitor historical: %v", err)
+	}
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, today); err != nil {
+		t.Fatalf("failed to aggregate today monitor historical: %v", err)
+	}
+
+	server := &Server{
+		db:                                  db,
+		serverConfig:                        ServerConfig{},
+		monitorConfig:                       monitorConfig,
+		historicalRegionDailyAggregateCache: newTTLCache[[]MonitorHistoricalRegionDailyAggregate](time.Hour),
+	}
+
+	getResponse := func() UptimeDataByRegionResponse {
+		request := httptest.NewRequest(http.MethodGet, "/uptime-data-by-region?monitorId="+monitorID, nil)
+		recorder := httptest.NewRecorder()
+		server.UptimeDataByRegionHandler(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
+		}
+
+		var response UptimeDataByRegionResponse
+		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+			t.Fatalf("failed to decode region response: %v", err)
+		}
+
+		return response
+	}
+
+	first := getResponse()
+	if len(first.Monitors) != 1 {
+		t.Fatalf("expected one region, got %d", len(first.Monitors))
+	}
+	firstRegion := first.Monitors[0]
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for cache test: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ExecContext(ctx, `
+		DELETE FROM monitor_historical_region_daily_aggregate
+		WHERE monitor_id = ? AND date = ? AND region = ?
+	`, monitorID, yesterday.Format("2006-01-02"), "us-east-1")
+	if err != nil {
+		t.Fatalf("failed to delete yesterday region aggregate row: %v", err)
+	}
+
+	second := getResponse()
+	if len(second.Monitors) != 1 {
+		t.Fatalf("expected one region after cache hit, got %d", len(second.Monitors))
+	}
+	if second.Monitors[0].ResponseTimeMs != firstRegion.ResponseTimeMs {
+		t.Fatalf("expected cached historical region response time %d, got %d", firstRegion.ResponseTimeMs, second.Monitors[0].ResponseTimeMs)
+	}
+
+	_, err = conn.ExecContext(ctx, `
+		UPDATE monitor_historical_region_daily_aggregate
+		SET avg_latency_ms = ?, success_rate = ?
+		WHERE monitor_id = ? AND date = ? AND region = ?
+	`, 400, 0, monitorID, today.Format("2006-01-02"), "us-east-1")
+	if err != nil {
+		t.Fatalf("failed to update today's region aggregate row: %v", err)
+	}
+
+	third := getResponse()
+	if len(third.Monitors) != 1 {
+		t.Fatalf("expected one region after refresh, got %d", len(third.Monitors))
+	}
+	if third.Monitors[0].Downtimes[0].DurationMinutes == second.Monitors[0].Downtimes[0].DurationMinutes {
+		t.Fatalf("expected today's region downtime to refresh, but it stayed at %d", second.Monitors[0].Downtimes[0].DurationMinutes)
+	}
+}
+
 func TestServer_FetchFromRawMonitorHistoricalFallback(t *testing.T) {
 	monitorID := "test-fallback-monitor"
 	testDate := time.Date(2025, 1, 17, 0, 0, 0, 0, time.UTC)

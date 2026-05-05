@@ -154,6 +154,10 @@ func (s *Server) loadHistoricalDailyAggregatesBeforeDate(ctx context.Context, mo
 		aggregates = append(aggregates, aggregate)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating historical daily aggregates: %w", err)
+	}
+
 	return aggregates, nil
 }
 
@@ -189,6 +193,10 @@ func (s *Server) loadHistoricalDailyAggregatesForDate(ctx context.Context, monit
 			return nil, fmt.Errorf("scanning current day daily aggregate: %w", err)
 		}
 		aggregates = append(aggregates, aggregate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating current day daily aggregates: %w", err)
 	}
 
 	return aggregates, nil
@@ -240,6 +248,10 @@ func (s *Server) loadHistoricalRegionDailyAggregatesBeforeDate(ctx context.Conte
 		aggregates = append(aggregates, aggregate)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating historical region daily aggregates: %w", err)
+	}
+
 	return aggregates, nil
 }
 
@@ -276,6 +288,10 @@ func (s *Server) loadHistoricalRegionDailyAggregatesForDate(ctx context.Context,
 			return nil, fmt.Errorf("scanning current day region daily aggregate: %w", err)
 		}
 		aggregates = append(aggregates, aggregate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating current day region daily aggregates: %w", err)
 	}
 
 	return aggregates, nil
@@ -1028,6 +1044,10 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegionRaw(ctx context.Context, m
 			return nil, fmt.Errorf("scanning monitor historical: %w", err)
 		}
 		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating monitor historical: %w", err)
 	}
 
 	regionData := make(map[string][]MonitorHistorical)
