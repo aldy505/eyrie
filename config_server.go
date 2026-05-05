@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 type DatasetConfig struct {
@@ -75,6 +76,18 @@ type ServerConfig struct {
 		Path                 string `yaml:"path" default:"eyrie.db"`
 		ReadConcurrencyLimit int    `yaml:"read_concurrency_limit" default:"0"`
 	} `yaml:"database"`
+	Cache struct {
+		Backend string `yaml:"backend" default:"memory"`
+		Redis   struct {
+			Address       string `yaml:"address"`
+			Username      string `yaml:"username"`
+			Password      string `yaml:"password"`
+			DB            int    `yaml:"db" default:"0"`
+			Prefix        string `yaml:"prefix" default:"eyrie:uptime-cache"`
+			TLS           bool   `yaml:"tls" default:"false"`
+			SkipTLSVerify bool   `yaml:"skip_tls_verify" default:"false"`
+		} `yaml:"redis"`
+	} `yaml:"cache"`
 	TaskQueue struct {
 		Processor struct {
 			ProducerAddress string `yaml:"producer_address" default:"mem://processor_tasks"`
@@ -129,6 +142,16 @@ func (c ServerConfig) Validate() error {
 
 	if c.Database.ReadConcurrencyLimit < 0 {
 		return fmt.Errorf("database.read_concurrency_limit must be zero or greater")
+	}
+
+	switch strings.ToLower(strings.TrimSpace(c.Cache.Backend)) {
+	case "", "memory":
+	case "redis":
+		if c.Cache.Redis.Address == "" {
+			return fmt.Errorf("cache.redis.address is required when cache.backend is redis")
+		}
+	default:
+		return fmt.Errorf("cache.backend must be either memory or redis")
 	}
 
 	return nil

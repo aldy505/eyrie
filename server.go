@@ -35,8 +35,8 @@ type Server struct {
 	processorProducer                   *pubsub.Topic
 	ingesterProducer                    *pubsub.Topic
 	duckDBReadLimiter                   *semaphore.Weighted
-	historicalDailyAggregateCache       *ttlCache[[]MonitorHistoricalDailyAggregate]
-	historicalRegionDailyAggregateCache *ttlCache[[]MonitorHistoricalRegionDailyAggregate]
+	historicalDailyAggregateCache       uptimeAggregateCache[[]MonitorHistoricalDailyAggregate]
+	historicalRegionDailyAggregateCache uptimeAggregateCache[[]MonitorHistoricalRegionDailyAggregate]
 }
 
 type ServerOptions struct {
@@ -57,14 +57,23 @@ func NewServer(options ServerOptions) (*Server, error) {
 	)
 
 	s := &Server{
-		db:                                  options.Database,
-		serverConfig:                        options.ServerConfig,
-		monitorConfig:                       options.MonitorConfig,
-		processorProducer:                   options.ProcessorProducer,
-		ingesterProducer:                    options.IngesterProducer,
-		duckDBReadLimiter:                   semaphore.NewWeighted(duckDBReadLimit),
-		historicalDailyAggregateCache:       newTTLCache[[]MonitorHistoricalDailyAggregate](uptimeDataCacheTTL),
-		historicalRegionDailyAggregateCache: newTTLCache[[]MonitorHistoricalRegionDailyAggregate](uptimeDataCacheTTL),
+		db:                options.Database,
+		serverConfig:      options.ServerConfig,
+		monitorConfig:     options.MonitorConfig,
+		processorProducer: options.ProcessorProducer,
+		ingesterProducer:  options.IngesterProducer,
+		duckDBReadLimiter: semaphore.NewWeighted(duckDBReadLimit),
+	}
+
+	var err error
+	s.historicalDailyAggregateCache, err = newUptimeAggregateCache[[]MonitorHistoricalDailyAggregate](options.ServerConfig, "uptime:daily", uptimeDataCacheTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating daily aggregate cache: %w", err)
+	}
+
+	s.historicalRegionDailyAggregateCache, err = newUptimeAggregateCache[[]MonitorHistoricalRegionDailyAggregate](options.ServerConfig, "uptime:region-daily", uptimeDataCacheTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating region aggregate cache: %w", err)
 	}
 
 	// Create a sub-filesystem rooted at frontend/dist so we can reference index.html directly
@@ -208,7 +217,7 @@ func (s *Server) historicalDailyAggregatesBeforeDate(ctx context.Context, monito
 	}
 
 	key := aggregateCacheKey(monitorID, beforeDate)
-	return s.historicalDailyAggregateCache.getOrLoad(key, func() ([]MonitorHistoricalDailyAggregate, error) {
+	return s.historicalDailyAggregateCache.getOrLoadContext(ctx, key, func(ctx context.Context) ([]MonitorHistoricalDailyAggregate, error) {
 		return s.loadHistoricalDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
 	})
 }
@@ -303,9 +312,29 @@ func (s *Server) historicalRegionDailyAggregatesBeforeDate(ctx context.Context, 
 	}
 
 	key := aggregateCacheKey(monitorID, beforeDate)
-	return s.historicalRegionDailyAggregateCache.getOrLoad(key, func() ([]MonitorHistoricalRegionDailyAggregate, error) {
+	return s.historicalRegionDailyAggregateCache.getOrLoadContext(ctx, key, func(ctx context.Context) ([]MonitorHistoricalRegionDailyAggregate, error) {
 		return s.loadHistoricalRegionDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
 	})
+}
+
+func (s *Server) CloseCaches() error {
+	if s == nil {
+		return nil
+	}
+
+	if s.historicalDailyAggregateCache != nil {
+		if err := s.historicalDailyAggregateCache.close(); err != nil {
+			return err
+		}
+	}
+
+	if s.historicalRegionDailyAggregateCache != nil {
+		if err := s.historicalRegionDailyAggregateCache.close(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *Server) withDuckDBReadPermit(next http.HandlerFunc) http.HandlerFunc {

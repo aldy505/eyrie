@@ -34,3 +34,16 @@ func TestServerConfigValidateRejectsNegativeReadConcurrencyLimit(t *testing.T) {
 		t.Fatalf("expected database.read_concurrency_limit error, got %v", err)
 	}
 }
+
+func TestServerConfigValidateRejectsRedisCacheWithoutAddress(t *testing.T) {
+	config := ServerConfig{}
+	config.Cache.Backend = "redis"
+
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("expected redis cache validation error")
+	}
+	if !strings.Contains(err.Error(), "cache.redis.address") {
+		t.Fatalf("expected cache.redis.address error, got %v", err)
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -62,8 +63,14 @@ func (c *ttlCache[T]) set(key string, value T) {
 }
 
 func (c *ttlCache[T]) getOrLoad(key string, loader func() (T, error)) (T, error) {
-	if c == nil {
+	return c.getOrLoadContext(context.Background(), key, func(context.Context) (T, error) {
 		return loader()
+	})
+}
+
+func (c *ttlCache[T]) getOrLoadContext(ctx context.Context, key string, loader func(context.Context) (T, error)) (T, error) {
+	if c == nil {
+		return loader(ctx)
 	}
 
 	if value, ok := c.get(key); ok {
@@ -75,7 +82,7 @@ func (c *ttlCache[T]) getOrLoad(key string, loader func() (T, error)) (T, error)
 			return value, nil
 		}
 
-		value, err := loader()
+		value, err := loader(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -89,4 +96,8 @@ func (c *ttlCache[T]) getOrLoad(key string, loader func() (T, error)) (T, error)
 	}
 
 	return result.(T), nil
+}
+
+func (c *ttlCache[T]) close() error {
+	return nil
 }
