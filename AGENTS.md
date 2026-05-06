@@ -14,8 +14,12 @@
 
 ## Runtime Modes & Components
 ### Modes (entrypoint: `main.go`)
-- **server** (default): runs HTTP API + embedded SPA + worker processes.
+- **server** (default): runs the HTTP API + embedded SPA only.
 - **checker**: regional agent that registers with the server and performs monitor checks.
+- **ingester**: standalone ingester worker.
+- **worker**: standalone processor worker.
+- **alerter**: standalone alerter worker.
+- **all**: runs the HTTP API plus all background workers in one process.
 
 ### Server Components
 - **HTTP API** (see `server.go`):
@@ -26,7 +30,7 @@
   - `POST /checker/register` → checker registration + config fetch.
   - `POST /checker/submit` → checker submissions.
   - `/` → SPA handler for frontend.
-- **Workers** (spawned in server mode):
+- **Workers** (standalone modes or spawned in `all` mode):
   - **IngesterWorker**: ingests raw `monitor_historical` and performs daily aggregation.
   - **ProcessorWorker**: analyzes recent submissions, updates incident state/records, and decides if an alert should fire.
   - **AlerterWorker**: receives alert messages (currently logs; TODO for real delivery).
@@ -84,7 +88,7 @@ See `example_configurations/` for:
 ## Data Storage & Migrations
 - Uses **DuckDB** via `duckdb-go`.
 - Migration logic lives in `database_migration.go` and `migrations/`.
-- Server mode runs migrations on startup.
+- Server-side modes (`server`, `ingester`, `worker`, and `all`) run migrations on startup.
 - Migrations use Go + Goose with embedded files via `//go:embed`.
 - Incident storage currently spans:
   - `monitor_incident_state` for current derived health
@@ -116,7 +120,7 @@ Task queues drive worker pipelines:
 ## Local Development Commands
 ### Backend (from `CONTRIBUTING.md`)
 ```bash
-go run . -mode=server -config=./example_configurations/server.example.yaml -monitor=./example_configurations/monitor.example.yaml
+go run . -mode=all -config=./example_configurations/server.example.yaml -monitor=./example_configurations/monitor.example.yaml
 ```
 Checker nodes (per region):
 ```bash
@@ -146,7 +150,8 @@ npm run dev
 - Metric coverage currently includes checker cycles, monitor checks, submission receipt/send/ingestion, incident transitions, and alert delivery outcomes.
 
 ## Notes for Agents
-- Server mode starts workers and runs migrations—be mindful of side effects when testing locally.
+- `all` mode matches the previous combined server behavior; `server` now runs only the HTTP/API process.
+- Server-side modes (`server`, `ingester`, `worker`, and `all`) run migrations—be mindful of side effects when testing locally.
 - The SPA is embedded; missing `frontend/dist` will break builds/tests that compile `server.go`.
 - Task queues are configured via addresses; `mem://` is used in example configs for local dev.
 - Programmatic incidents are the current source of truth. The schema now preserves machine-derived fields separately from user-facing fields so manual adjustment can be layered in later without losing the original automatic context.
