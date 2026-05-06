@@ -14,12 +14,12 @@
 
 ## Runtime Modes & Components
 ### Modes (entrypoint: `main.go`)
-- **server** (default): runs the HTTP API + embedded SPA only.
+- **server**: runs the HTTP API + embedded SPA only.
 - **checker**: regional agent that registers with the server and performs monitor checks.
 - **ingester**: standalone ingester worker.
 - **worker**: standalone processor worker.
 - **alerter**: standalone alerter worker.
-- **all**: runs the HTTP API plus all background workers in one process.
+- **all** (default): runs the HTTP API plus all background workers in one process.
 
 ### Server Components
 - **HTTP API** (see `server.go`):

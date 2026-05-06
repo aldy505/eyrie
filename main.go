@@ -12,7 +12,7 @@ import (
 var Version string = "dev"
 
 func main() {
-	mode := flag.String("mode", "server", "The mode of the current process, possible values are: server, checker, ingester, worker, alerter, all")
+	mode := flag.String("mode", "all", "The mode of the current process, possible values are: server, checker, ingester, worker, alerter, all")
 	configPath := flag.String("config", "config.yaml", "Path to configuration file")
 	monitorPath := flag.String("monitor", "monitor.yaml", "Path to monitor file (required for server, ingester, worker, and all modes)")
 	flag.Parse()
