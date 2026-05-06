@@ -63,6 +63,24 @@ func TestTTLCacheGetOrLoadExpiresValue(t *testing.T) {
 	}
 }
 
+func TestTTLCacheSetEvictsExpiredEntries(t *testing.T) {
+	cache := newTTLCache[string](10 * time.Millisecond)
+
+	cache.set("expired", "value")
+	time.Sleep(20 * time.Millisecond)
+	cache.set("fresh", "value")
+
+	if _, ok := cache.entries["expired"]; ok {
+		t.Fatal("expected expired entry to be evicted during set")
+	}
+	if _, ok := cache.entries["fresh"]; !ok {
+		t.Fatal("expected fresh entry to remain cached")
+	}
+	if got := len(cache.entries); got != 1 {
+		t.Fatalf("expected exactly 1 cached entry, got %d", got)
+	}
+}
+
 func TestTTLCacheGetOrLoadDeduplicatesConcurrentMisses(t *testing.T) {
 	cache := newTTLCache[int](time.Minute)
 

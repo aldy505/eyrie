@@ -126,9 +126,7 @@ func resolveDuckDBReadConcurrencyLimit(configured int, gomaxprocs int) int64 {
 }
 
 func aggregateCacheKey(monitorID string, day time.Time) string {
-	// Use stable key per monitor (drop date to avoid memory leak from accumulating daily keys).
-	// The beforeDate filtering is handled by the loader function.
-	return monitorID
+	return monitorID + ":" + utcDayStart(day).Format("2006-01-02")
 }
 
 func (s *Server) loadHistoricalDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalDailyAggregate, error) {
@@ -1005,7 +1003,12 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 		return nil, rawErr
 	}
 
-	return summarizeUptimeRegionHistoricalRows(rawRegionData), nil
+	monitorConfig, err := s.findMonitorConfig(monitorId)
+	if err != nil {
+		return nil, err
+	}
+
+	return summarizeUptimeRegionHistoricalRows(rawRegionData, monitorConfig), nil
 }
 
 func (s *Server) fetchMonitorHistoricalGroupedByRegionFromAggregates(ctx context.Context, monitorId string) ([]UptimeDataByRegionMonitor, error) {

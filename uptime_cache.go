@@ -33,10 +33,22 @@ func (c *ttlCache[T]) get(key string) (T, bool) {
 		return zero, false
 	}
 
+	now := time.Now()
+	c.mu.RLock()
+	entry, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok {
+		return zero, false
+	}
+
+	if now.Before(entry.expiresAt) {
+		return entry.value, true
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	entry, ok := c.entries[key]
+	entry, ok = c.entries[key]
 	if !ok {
 		return zero, false
 	}
@@ -55,9 +67,15 @@ func (c *ttlCache[T]) set(key string, value T) {
 	}
 
 	c.mu.Lock()
+	now := time.Now()
+	for entryKey, entry := range c.entries {
+		if now.After(entry.expiresAt) {
+			delete(c.entries, entryKey)
+		}
+	}
 	c.entries[key] = ttlCacheEntry[T]{
 		value:     value,
-		expiresAt: time.Now().Add(c.ttl),
+		expiresAt: now.Add(c.ttl),
 	}
 	c.mu.Unlock()
 }

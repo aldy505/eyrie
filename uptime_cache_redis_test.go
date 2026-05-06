@@ -114,3 +114,70 @@ func TestRedisTTLCacheExpiresEntries(t *testing.T) {
 		t.Fatalf("expected loader to run twice after expiration, ran %d times", calls)
 	}
 }
+
+func TestRedisTTLCacheGetOrLoadContextCancellationStillCachesValue(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start redis: %v", err)
+	}
+	defer redisServer.Close()
+
+	config := ServerConfig{}
+	config.Cache.Backend = "redis"
+	config.Cache.Redis.Address = redisServer.Addr()
+
+	cache, err := newUptimeAggregateCache[string](config, "uptime:daily", time.Minute)
+	if err != nil {
+		t.Fatalf("failed to create redis cache: %v", err)
+	}
+	defer cache.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstValue := make(chan string, 1)
+	firstErr := make(chan error, 1)
+
+	go func() {
+		value, err := cache.getOrLoadContext(ctx, "monitor:day", func(context.Context) (string, error) {
+			close(started)
+			<-release
+			return "cached-value", nil
+		})
+		if err != nil {
+			firstErr <- err
+			return
+		}
+		firstValue <- value
+	}()
+
+	<-started
+	cancel()
+	close(release)
+
+	select {
+	case err := <-firstErr:
+		t.Fatalf("unexpected error from cancelled load: %v", err)
+	case value := <-firstValue:
+		if value != "cached-value" {
+			t.Fatalf("unexpected cached value: %q", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first load to finish")
+	}
+
+	var calls int
+	value, err := cache.getOrLoadContext(context.Background(), "monitor:day", func(context.Context) (string, error) {
+		calls++
+		return "should-not-run", nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error on second load: %v", err)
+	}
+	if value != "cached-value" {
+		t.Fatalf("expected cached value, got %q", value)
+	}
+	if calls != 0 {
+		t.Fatalf("expected redis cache hit on second load, loader ran %d times", calls)
+	}
+}

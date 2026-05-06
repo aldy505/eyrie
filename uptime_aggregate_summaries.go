@@ -83,9 +83,38 @@ func summarizeRegionHistoricalAggregates(rows []MonitorHistoricalRegionDailyAggr
 	return monitors
 }
 
-func summarizeUptimeRegionHistoricalRows(regionData map[string][]MonitorHistorical) []UptimeDataByRegionMonitor {
+type successPredicate func(statusCode int, explicitSuccess bool) bool
+
+func (p successPredicate) IsSuccessfulStatus(statusCode int, explicitSuccess bool) bool {
+	return p(statusCode, explicitSuccess)
+}
+
+func resolveSuccessPredicate(successSource []any) func(int, bool) bool {
+	if len(successSource) == 0 || successSource[0] == nil {
+		return func(_ int, explicitSuccess bool) bool { return explicitSuccess }
+	}
+
+	switch value := successSource[0].(type) {
+	case Monitor:
+		return value.IsSuccessfulStatus
+	case *Monitor:
+		if value == nil {
+			return func(_ int, explicitSuccess bool) bool { return explicitSuccess }
+		}
+		return value.IsSuccessfulStatus
+	case successPredicate:
+		return value
+	case func(int, bool) bool:
+		return value
+	default:
+		return func(_ int, explicitSuccess bool) bool { return explicitSuccess }
+	}
+}
+
+func summarizeUptimeRegionHistoricalRows(regionData map[string][]MonitorHistorical, successSource ...any) []UptimeDataByRegionMonitor {
 	monitors := make([]UptimeDataByRegionMonitor, 0, len(regionData))
 	now := time.Now().UTC()
+	isSuccessful := resolveSuccessPredicate(successSource)
 
 	for region, historicals := range regionData {
 		dailyBucket := make(map[time.Time][]MonitorHistorical)
@@ -110,7 +139,7 @@ func summarizeUptimeRegionHistoricalRows(regionData map[string][]MonitorHistoric
 			for _, mh := range dayHistoricals {
 				totalLatency += int64(mh.LatencyMs)
 				totalChecks++
-				if !mh.Success {
+				if !isSuccessful(mh.StatusCode, mh.Success) {
 					downtimeMinutes += 1
 				}
 			}

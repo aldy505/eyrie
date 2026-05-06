@@ -115,7 +115,7 @@ func (c *redisTTLCache[T]) getOrLoadContext(ctx context.Context, key string, loa
 	loadCtx := context.WithoutCancel(ctx)
 
 	result, err, _ := c.group.Do(key, func() (any, error) {
-		if value, ok, err := c.get(ctx, key); err != nil {
+		if value, ok, err := c.get(loadCtx, key); err != nil {
 			return nil, err
 		} else if ok {
 			return value, nil
@@ -126,7 +126,7 @@ func (c *redisTTLCache[T]) getOrLoadContext(ctx context.Context, key string, loa
 			return nil, err
 		}
 
-		if err := c.set(ctx, key, value); err != nil {
+		if err := c.set(loadCtx, key, value); err != nil {
 			return nil, err
 		}
 
