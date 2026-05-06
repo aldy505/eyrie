@@ -175,6 +175,10 @@ func main() {
 				slog.Error("failed to shutdown server", slog.String("error", err.Error()))
 			}
 
+			if err := srv.CloseCaches(); err != nil {
+				slog.Error("failed to close uptime caches", slog.String("error", err.Error()))
+			}
+
 			if err := alerterWorker.Stop(); err != nil {
 				slog.Error("failed to stop alerter worker", slog.String("error", err.Error()))
 			}
