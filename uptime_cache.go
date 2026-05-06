@@ -77,12 +77,18 @@ func (c *ttlCache[T]) getOrLoadContext(ctx context.Context, key string, loader f
 		return value, nil
 	}
 
+	// Use context.WithoutCancel to prevent the first caller's context cancellation
+	// from affecting concurrent waiters in singleflight.Do.
+	// If this caller's context is done, we still wait for the shared load to complete
+	// so other waiters can benefit from it.
+	loadCtx := context.WithoutCancel(ctx)
+
 	result, err, _ := c.group.Do(key, func() (any, error) {
 		if value, ok := c.get(key); ok {
 			return value, nil
 		}
 
-		value, err := loader(ctx)
+		value, err := loader(loadCtx)
 		if err != nil {
 			return nil, err
 		}

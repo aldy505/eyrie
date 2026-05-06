@@ -110,6 +110,10 @@ func (c *redisTTLCache[T]) getOrLoadContext(ctx context.Context, key string, loa
 		return value, nil
 	}
 
+	// Use context.WithoutCancel to prevent the first caller's context cancellation
+	// from affecting concurrent waiters in singleflight.Do.
+	loadCtx := context.WithoutCancel(ctx)
+
 	result, err, _ := c.group.Do(key, func() (any, error) {
 		if value, ok, err := c.get(ctx, key); err != nil {
 			return nil, err
@@ -117,7 +121,7 @@ func (c *redisTTLCache[T]) getOrLoadContext(ctx context.Context, key string, loa
 			return value, nil
 		}
 
-		value, err := loader(ctx)
+		value, err := loader(loadCtx)
 		if err != nil {
 			return nil, err
 		}
