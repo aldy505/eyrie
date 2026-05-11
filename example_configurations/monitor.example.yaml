@@ -24,6 +24,12 @@ monitors:
       headers:
         User-Agent: "EyrieMonitor/1.0"
       timeout_seconds: 30
+      # Optional per-monitor TLS files for private PKI or mTLS.
+      # They are reloaded for every probe so external certificate rotation is picked up.
+      # ca_cert_path: "/etc/eyrie/tls/ca.pem"
+      # client_cert_path: "/etc/eyrie/tls/client.crt"
+      # client_key_path: "/etc/eyrie/tls/client.key"
+      # client_key_password: "change-me"
   - id: "example-monitor-3"
     name: "Example Monitor 3"
     description: "This is an example monitor checking example.net"

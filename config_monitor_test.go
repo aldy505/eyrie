@@ -66,3 +66,35 @@ func TestMonitorConfigForChecker(t *testing.T) {
 		t.Fatalf("unexpected filtered group monitor ids: %#v", got)
 	}
 }
+
+func TestMonitorValidateHTTPClientCertificateRequiresKeyPair(t *testing.T) {
+	monitor := Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			URL:            "https://example.com",
+			ClientCertPath: "/tmp/client.crt",
+		},
+	}
+
+	err := monitor.Validate()
+	if err == nil || err.Error() != "monitor http-monitor: http.client_cert_path and http.client_key_path must be set together" {
+		t.Fatalf("expected client cert/key pair validation error, got %v", err)
+	}
+}
+
+func TestMonitorValidateHTTPClientKeyPasswordRequiresKey(t *testing.T) {
+	monitor := Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			URL:               "https://example.com",
+			ClientKeyPassword: "secret",
+		},
+	}
+
+	err := monitor.Validate()
+	if err == nil || err.Error() != "monitor http-monitor: http.client_key_password requires http.client_key_path" {
+		t.Fatalf("expected client key password validation error, got %v", err)
+	}
+}

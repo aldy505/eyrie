@@ -3,11 +3,19 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -91,6 +99,118 @@ func TestProbeHTTPUnexpectedStatus(t *testing.T) {
 	}
 	if !submission.FailureReason.Valid || !strings.Contains(submission.FailureReason.String, "unexpected status code 500") {
 		t.Fatalf("expected unexpected status failure reason, got %q", submission.FailureReason.String)
+	}
+}
+
+func TestProbeHTTPMutualTLS(t *testing.T) {
+	caCertPEM, caCert, caKey := mustGenerateCertificateAuthority(t)
+	serverCertPEM, serverKeyPEM := mustGenerateLeafCertificate(t, caCert, caKey, false, "127.0.0.1")
+	clientCertPEM, clientKeyPEM := mustGenerateLeafCertificate(t, caCert, caKey, true, "eyrie-client")
+
+	caCertPath := writeTempTLSFile(t, "ca-*.pem", caCertPEM)
+	clientCertPath := writeTempTLSFile(t, "client-*.crt", clientCertPEM)
+	clientKeyPath := writeTempTLSFile(t, "client-*.key", clientKeyPEM)
+
+	serverCertificate, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
+	if err != nil {
+		t.Fatalf("failed to load server certificate: %v", err)
+	}
+
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(caCertPEM) {
+		t.Fatal("failed to append CA certificate to client CA pool")
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			t.Fatal("expected peer certificate on mutual TLS request")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCertificate},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeHTTP(t.Context(), Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			Method:              http.MethodGet,
+			URL:                 server.URL,
+			CACertPath:          caCertPath,
+			ClientCertPath:      clientCertPath,
+			ClientKeyPath:       clientKeyPath,
+			ExpectedStatusCodes: []int{http.StatusOK},
+		},
+	})
+
+	if !submission.Success {
+		t.Fatalf("expected http probe success, got failure reason %q", submission.FailureReason.String)
+	}
+}
+
+func TestProbeHTTPMutualTLSEncryptedPrivateKey(t *testing.T) {
+	caCertPEM, caCert, caKey := mustGenerateCertificateAuthority(t)
+	serverCertPEM, serverKeyPEM := mustGenerateLeafCertificate(t, caCert, caKey, false, "127.0.0.1")
+	clientCertPEM, clientKeyPEM := mustGenerateLeafCertificate(t, caCert, caKey, true, "eyrie-client")
+
+	encryptedClientKeyPEM := mustEncryptPEMBlock(t, clientKeyPEM, "hunter2")
+	caCertPath := writeTempTLSFile(t, "ca-*.pem", caCertPEM)
+	clientCertPath := writeTempTLSFile(t, "client-*.crt", clientCertPEM)
+	clientKeyPath := writeTempTLSFile(t, "client-*.key", encryptedClientKeyPEM)
+
+	serverCertificate, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
+	if err != nil {
+		t.Fatalf("failed to load server certificate: %v", err)
+	}
+
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(caCertPEM) {
+		t.Fatal("failed to append CA certificate to client CA pool")
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCertificate},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	submission := checker.probeHTTP(t.Context(), Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			Method:              http.MethodGet,
+			URL:                 server.URL,
+			CACertPath:          caCertPath,
+			ClientCertPath:      clientCertPath,
+			ClientKeyPath:       clientKeyPath,
+			ClientKeyPassword:   "hunter2",
+			ExpectedStatusCodes: []int{http.StatusOK},
+		},
+	})
+
+	if !submission.Success {
+		t.Fatalf("expected http probe success, got failure reason %q", submission.FailureReason.String)
 	}
 }
 
@@ -262,6 +382,118 @@ func TestProbeICMPFailure(t *testing.T) {
 	if submission.FailureReason.String != "icmp failed" {
 		t.Fatalf("expected icmp failure output, got %q", submission.FailureReason.String)
 	}
+}
+
+func mustGenerateCertificateAuthority(t *testing.T) ([]byte, *x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate CA private key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "Eyrie Test CA",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("failed to create CA certificate: %v", err)
+	}
+
+	certificate, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatalf("failed to parse CA certificate: %v", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), certificate, privateKey
+}
+
+func mustGenerateLeafCertificate(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey, clientAuth bool, name string) ([]byte, []byte) {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		t.Fatalf("failed to generate serial number: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: name,
+		},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:       []string{name},
+		IPAddresses:    nil,
+		IsCA:           false,
+		MaxPathLen:     0,
+		MaxPathLenZero: false,
+	}
+	if clientAuth {
+		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		template.DNSNames = nil
+	} else if ip := net.ParseIP(name); ip != nil {
+		template.DNSNames = nil
+		template.IPAddresses = []net.IP{ip}
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &privateKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	return certPEM, keyPEM
+}
+
+func mustEncryptPEMBlock(t *testing.T, keyPEM []byte, password string) []byte {
+	t.Helper()
+
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		t.Fatal("failed to decode PEM block")
+	}
+
+	encryptedBlock, err := x509.EncryptPEMBlock(rand.Reader, block.Type, block.Bytes, []byte(password), x509.PEMCipherAES256)
+	if err != nil {
+		t.Fatalf("failed to encrypt PEM block: %v", err)
+	}
+
+	return pem.EncodeToMemory(encryptedBlock)
+}
+
+func writeTempTLSFile(t *testing.T, pattern string, contents []byte) string {
+	t.Helper()
+
+	file, err := os.CreateTemp(t.TempDir(), pattern)
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Write(contents); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	return file.Name()
 }
 
 func TestProbeDatabaseDrivers(t *testing.T) {

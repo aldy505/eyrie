@@ -18,7 +18,7 @@ The backend is a Go monolith that can run as a **server** or a **checker**. The 
 
 | Type | Config block | Notes |
 | --- | --- | --- |
-| HTTP | `http` | Supports headers, expected status codes, TLS verification toggle |
+| HTTP | `http` | Supports headers, expected status codes, custom CA trust, and optional client certificates |
 | TCP | `tcp` | Optional TLS, request payload, and substring assertion |
 | ICMP | `icmp` | Uses the system `ping` binary |
 | Redis | `redis` | Optional auth, database selection, and TLS |
@@ -93,6 +93,31 @@ monitors:
 ```
 
 Monitors without `checker_names` are still sent to every checker.
+
+## HTTP TLS client certificates
+
+HTTP monitors can override TLS material per monitor:
+
+- `http.ca_cert_path` adds a CA bundle for private trust chains.
+- `http.client_cert_path` and `http.client_key_path` enable mTLS.
+- `http.client_key_password` can be used when the private key is PEM-encrypted.
+
+These files are loaded when each probe runs instead of only once at checker startup, so externally rotated certificates can be picked up without restarting the checker.
+
+```yaml
+monitors:
+  - id: "internal-api"
+    name: "Internal API"
+    type: "http"
+    http:
+      url: "https://internal.example.com/health"
+      ca_cert_path: "/etc/eyrie/tls/ca.pem"
+      client_cert_path: "/etc/eyrie/tls/client.crt"
+      client_key_path: "/etc/eyrie/tls/client.key"
+      client_key_password: "${INTERNAL_API_KEY_PASSWORD}"
+      expected_status_codes:
+        - 200
+```
 
 ## Incident model
 
