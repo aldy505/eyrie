@@ -159,6 +159,51 @@ func TestProbeHTTPMutualTLS(t *testing.T) {
 	}
 }
 
+func TestNewTLSConfigCachesSystemCertPool(t *testing.T) {
+	oldOnce := systemCertPoolOnce
+	oldPool := systemCertPool
+	oldErr := systemCertPoolErr
+	oldLoader := systemCertPoolLoad
+	t.Cleanup(func() {
+		systemCertPoolOnce = oldOnce
+		systemCertPool = oldPool
+		systemCertPoolErr = oldErr
+		systemCertPoolLoad = oldLoader
+	})
+
+	systemCertPoolOnce = sync.Once{}
+	systemCertPool = nil
+	systemCertPoolErr = nil
+
+	var calls int
+	systemCertPoolLoad = func() (*x509.CertPool, error) {
+		calls++
+		return x509.NewCertPool(), nil
+	}
+
+	caCertPEM, _, _ := mustGenerateCertificateAuthority(t)
+	caCertPath := writeTempTLSFile(t, "ca-*.pem", caCertPEM)
+
+	firstConfig, err := (MonitorHTTPConfig{CACertPath: caCertPath}).NewTLSConfig()
+	if err != nil {
+		t.Fatalf("expected first TLS config to load, got %v", err)
+	}
+	secondConfig, err := (MonitorHTTPConfig{CACertPath: caCertPath}).NewTLSConfig()
+	if err != nil {
+		t.Fatalf("expected second TLS config to load, got %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("expected system CA pool to load once, got %d calls", calls)
+	}
+	if firstConfig.RootCAs == nil || secondConfig.RootCAs == nil {
+		t.Fatal("expected both TLS configs to include root CAs")
+	}
+	if firstConfig.RootCAs == secondConfig.RootCAs {
+		t.Fatal("expected TLS configs to use cloned root CA pools")
+	}
+}
+
 func TestProbeHTTPMutualTLSEncryptedPrivateKey(t *testing.T) {
 	caCertPEM, caCert, caKey := mustGenerateCertificateAuthority(t)
 	serverCertPEM, serverKeyPEM := mustGenerateLeafCertificate(t, caCert, caKey, false, "127.0.0.1")

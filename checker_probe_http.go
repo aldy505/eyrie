@@ -11,9 +11,17 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/guregu/null/v5"
+)
+
+var (
+	systemCertPoolOnce sync.Once
+	systemCertPool     *x509.CertPool
+	systemCertPoolErr  error
+	systemCertPoolLoad = x509.SystemCertPool
 )
 
 func (c *Checker) probeHTTP(ctx context.Context, monitor Monitor) CheckerSubmissionRequest {
@@ -112,12 +120,9 @@ func (c MonitorHTTPConfig) NewTLSConfig() (*tls.Config, error) {
 			return nil, fmt.Errorf("load http CA certificate %q: %w", c.CACertPath, err)
 		}
 
-		rootCAs, err := x509.SystemCertPool()
+		rootCAs, err := cachedSystemCertPool()
 		if err != nil {
 			return nil, fmt.Errorf("load system CA pool: %w", err)
-		}
-		if rootCAs == nil {
-			rootCAs = x509.NewCertPool()
 		}
 		if ok := rootCAs.AppendCertsFromPEM(caCertPEM); !ok {
 			return nil, fmt.Errorf("parse http CA certificate %q: no certificates found", c.CACertPath)
@@ -134,6 +139,19 @@ func (c MonitorHTTPConfig) NewTLSConfig() (*tls.Config, error) {
 	}
 
 	return tlsConfig, nil
+}
+
+func cachedSystemCertPool() (*x509.CertPool, error) {
+	systemCertPoolOnce.Do(func() {
+		systemCertPool, systemCertPoolErr = systemCertPoolLoad()
+		if systemCertPoolErr == nil && systemCertPool == nil {
+			systemCertPool = x509.NewCertPool()
+		}
+	})
+	if systemCertPoolErr != nil {
+		return nil, systemCertPoolErr
+	}
+	return systemCertPool.Clone(), nil
 }
 
 func (c MonitorHTTPConfig) loadClientCertificate() (tls.Certificate, error) {
