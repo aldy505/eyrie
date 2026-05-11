@@ -49,6 +49,68 @@ func TestResolveDuckDBReadConcurrencyLimit(t *testing.T) {
 	}
 }
 
+func TestServerPprofEndpointIsDisabledByDefault(t *testing.T) {
+	t.Setenv("ENABLE_PPROF_ENDPOINT", "")
+
+	server, err := NewServer(ServerOptions{
+		Database:      db,
+		ServerConfig:  ServerConfig{},
+		MonitorConfig: MonitorConfig{},
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.CloseCaches(); err != nil {
+			t.Fatalf("failed to close caches: %v", err)
+		}
+	})
+
+	ts := httptest.NewServer(server.Handler)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/debug/pprof/cmdline")
+	if err != nil {
+		t.Fatalf("failed to request pprof endpoint: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected spa fallback content type, got %q", got)
+	}
+}
+
+func TestServerPprofEndpointIsEnabledWithEnvVar(t *testing.T) {
+	t.Setenv("ENABLE_PPROF_ENDPOINT", "1")
+
+	server, err := NewServer(ServerOptions{
+		Database:      db,
+		ServerConfig:  ServerConfig{},
+		MonitorConfig: MonitorConfig{},
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.CloseCaches(); err != nil {
+			t.Fatalf("failed to close caches: %v", err)
+		}
+	})
+
+	ts := httptest.NewServer(server.Handler)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/debug/pprof/cmdline")
+	if err != nil {
+		t.Fatalf("failed to request pprof endpoint: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("expected pprof content type, got %q", got)
+	}
+}
+
 func TestServerWithDuckDBReadPermitWaitsForPermit(t *testing.T) {
 	server := &Server{
 		duckDBReadLimiter: semaphore.NewWeighted(1),
