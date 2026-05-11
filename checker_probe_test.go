@@ -121,9 +121,12 @@ func TestProbeHTTPMutualTLS(t *testing.T) {
 		t.Fatal("failed to append CA certificate to client CA pool")
 	}
 
+	handlerErrCh := make(chan error, 1)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			t.Fatal("expected peer certificate on mutual TLS request")
+			handlerErrCh <- fmt.Errorf("expected peer certificate on mutual TLS request")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -156,6 +159,12 @@ func TestProbeHTTPMutualTLS(t *testing.T) {
 
 	if !submission.Success {
 		t.Fatalf("expected http probe success, got failure reason %q", submission.FailureReason.String)
+	}
+
+	select {
+	case err := <-handlerErrCh:
+		t.Fatal(err)
+	default:
 	}
 }
 
@@ -201,6 +210,37 @@ func TestNewTLSConfigCachesSystemCertPool(t *testing.T) {
 	}
 	if firstConfig.RootCAs == secondConfig.RootCAs {
 		t.Fatal("expected TLS configs to use cloned root CA pools")
+	}
+}
+
+func TestNewTLSConfigFallsBackToEmptyPoolWhenSystemRootsUnavailable(t *testing.T) {
+	oldOnce := systemCertPoolOnce
+	oldPool := systemCertPool
+	oldErr := systemCertPoolErr
+	oldLoader := systemCertPoolLoad
+	t.Cleanup(func() {
+		systemCertPoolOnce = oldOnce
+		systemCertPool = oldPool
+		systemCertPoolErr = oldErr
+		systemCertPoolLoad = oldLoader
+	})
+
+	systemCertPoolOnce = sync.Once{}
+	systemCertPool = nil
+	systemCertPoolErr = nil
+	systemCertPoolLoad = func() (*x509.CertPool, error) {
+		return nil, errors.New("no system roots available")
+	}
+
+	caCertPEM, _, _ := mustGenerateCertificateAuthority(t)
+	caCertPath := writeTempTLSFile(t, "ca-*.pem", caCertPEM)
+
+	config, err := (MonitorHTTPConfig{CACertPath: caCertPath}).NewTLSConfig()
+	if err != nil {
+		t.Fatalf("expected TLS config to fall back to custom CA pool, got %v", err)
+	}
+	if config.RootCAs == nil {
+		t.Fatal("expected TLS config to include custom root CAs")
 	}
 }
 
@@ -256,6 +296,28 @@ func TestProbeHTTPMutualTLSEncryptedPrivateKey(t *testing.T) {
 
 	if !submission.Success {
 		t.Fatalf("expected http probe success, got failure reason %q", submission.FailureReason.String)
+	}
+}
+
+func TestNewTLSConfigReturnsOriginalErrorForNonEncryptedKeyMismatch(t *testing.T) {
+	caCertPEM, caCert, caKey := mustGenerateCertificateAuthority(t)
+	clientCertPEM, _ := mustGenerateLeafCertificate(t, caCert, caKey, true, "eyrie-client")
+
+	caCertPath := writeTempTLSFile(t, "ca-*.pem", caCertPEM)
+	clientCertPath := writeTempTLSFile(t, "client-*.crt", clientCertPEM)
+	clientKeyPath := writeTempTLSFile(t, "client-*.key", []byte("-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n"))
+
+	_, err := (MonitorHTTPConfig{
+		CACertPath:        caCertPath,
+		ClientCertPath:    clientCertPath,
+		ClientKeyPath:     clientKeyPath,
+		ClientKeyPassword: "hunter2",
+	}).NewTLSConfig()
+	if err == nil {
+		t.Fatal("expected an error for mismatched non-encrypted client key")
+	}
+	if !strings.Contains(err.Error(), "load http client certificate") {
+		t.Fatalf("expected original key parsing error to be preserved, got %v", err)
 	}
 }
 

@@ -122,7 +122,7 @@ func (c MonitorHTTPConfig) NewTLSConfig() (*tls.Config, error) {
 
 		rootCAs, err := cachedSystemCertPool()
 		if err != nil {
-			return nil, fmt.Errorf("load system CA pool: %w", err)
+			rootCAs = x509.NewCertPool()
 		}
 		if ok := rootCAs.AppendCertsFromPEM(caCertPEM); !ok {
 			return nil, fmt.Errorf("parse http CA certificate %q: no certificates found", c.CACertPath)
@@ -174,6 +174,8 @@ func (c MonitorHTTPConfig) loadClientCertificate() (tls.Certificate, error) {
 
 	if certificate, err := tls.X509KeyPair(certPEM, keyPEM); err == nil {
 		return certificate, nil
+	} else if !pemContainsEncryptedBlock(keyPEM) {
+		return tls.Certificate{}, fmt.Errorf("load http client certificate %q and key %q: %w", c.ClientCertPath, c.ClientKeyPath, err)
 	}
 
 	decryptedKeyPEM, err := decryptPEMPrivateKey(keyPEM, c.ClientKeyPassword)
@@ -217,4 +219,19 @@ func decryptPEMPrivateKey(keyPEM []byte, password string) ([]byte, error) {
 	}
 
 	return decryptedPEM, nil
+}
+
+func pemContainsEncryptedBlock(pemBytes []byte) bool {
+	remaining := pemBytes
+	for len(remaining) > 0 {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			return false
+		}
+		if x509.IsEncryptedPEMBlock(block) {
+			return true
+		}
+		remaining = rest
+	}
+	return false
 }

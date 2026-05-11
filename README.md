@@ -100,9 +100,9 @@ HTTP monitors can override TLS material per monitor:
 
 - `http.ca_cert_path` adds a CA bundle for private trust chains.
 - `http.client_cert_path` and `http.client_key_path` enable mTLS.
-- `http.client_key_password` can be used when the private key is PEM-encrypted.
+- `http.client_key_password` can be used with legacy PEM-encrypted private keys.
 
-These files are loaded when each probe runs instead of only once at checker startup, so externally rotated certificates can be picked up without restarting the checker.
+These files are loaded when each probe runs instead of only once at checker startup, so externally rotated certificates can be picked up without restarting the checker. The YAML loader does not expand environment variables, so the password value must be provided literally or substituted before the monitor config is loaded.
 
 ```yaml
 monitors:
@@ -114,7 +114,7 @@ monitors:
       ca_cert_path: "/etc/eyrie/tls/ca.pem"
       client_cert_path: "/etc/eyrie/tls/client.crt"
       client_key_path: "/etc/eyrie/tls/client.key"
-      client_key_password: "${INTERNAL_API_KEY_PASSWORD}"
+      client_key_password: "change-me"
       expected_status_codes:
         - 200
 ```
