@@ -14,9 +14,15 @@ import (
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/getsentry/sentry-go"
 	sentryhttpclient "github.com/getsentry/sentry-go/httpclient"
+	sentryslog "github.com/getsentry/sentry-go/slog"
 	"github.com/goccy/go-yaml"
 	"github.com/kelseyhightower/envconfig"
 	"gocloud.dev/pubsub"
+
+	_ "gocloud.dev/pubsub/kafkapubsub"
+	_ "gocloud.dev/pubsub/mempubsub"
+	_ "gocloud.dev/pubsub/natspubsub"
+	_ "gocloud.dev/pubsub/rabbitpubsub"
 )
 
 type modeRunner interface {
@@ -203,16 +209,26 @@ func loadCheckerConfig(configPath string) (CheckerConfig, error) {
 }
 
 func initSentryClient(config sentryRuntimeConfig) error {
-	return sentry.Init(sentry.ClientOptions{
-		Dsn:              config.Dsn,
-		SampleRate:       config.ErrorSampleRate,
-		EnableTracing:    true,
-		TracesSampleRate: config.TracesSampleRate,
-		EnableLogs:       true,
-		AttachStacktrace: true,
-		Debug:            config.Debug,
-		Release:          Version,
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn:                  config.Dsn,
+		SampleRate:           config.ErrorSampleRate,
+		EnableTracing:        true,
+		TracesSampleRate:     config.TracesSampleRate,
+		EnableLogs:           true,
+		Debug:                config.Debug,
+		Release:              Version,
+		PropagateTraceparent: true,
 	})
+
+	ctx := context.Background()
+	handler := sentryslog.Option{
+		EventLevel: []slog.Level{slog.LevelError, sentryslog.LevelFatal}, // Only Error and Fatal as events
+		LogLevel:   []slog.Level{slog.LevelWarn, slog.LevelInfo},         // Only Warn and Info as logs
+	}.NewSentryHandler(ctx)
+
+	slog.SetDefault(slog.New(slog.NewMultiHandler(handler, slog.NewTextHandler(nil, nil))))
+
+	return err
 }
 
 func flushSentry() {

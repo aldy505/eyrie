@@ -1,13 +1,14 @@
 module github.com/aldy505/eyrie
 
-go 1.25.3
+go 1.26
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.45.0
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/denisenkom/go-mssqldb v0.12.3
 	github.com/duckdb/duckdb-go/v2 v2.5.4
-	github.com/getsentry/sentry-go v0.43.0
+	github.com/getsentry/sentry-go v0.46.2
+	github.com/getsentry/sentry-go/slog v0.46.2
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/goccy/go-yaml v1.19.1
 	github.com/google/uuid v1.6.0
