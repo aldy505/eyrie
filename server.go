@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
@@ -100,6 +102,9 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.MonitorIncidentsHandler))))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
+	if os.Getenv("ENABLE_PPROF_ENDPOINT") == "1" {
+		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	}
 	mux.Handle("/", SpaHandler(distFS, "index.html"))
 
 	srv := &http.Server{
