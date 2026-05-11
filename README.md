@@ -2,7 +2,7 @@
 
 Eyrie is a distributed uptime monitoring system built for region-aware checks, lightweight deployment, and a status page that reflects both current health and recent history.
 
-The backend is a Go monolith that can run as a **server** or a **checker**. The frontend is a React 19 + Vite SPA embedded into the server binary at build time.
+The backend is a Go monolith that can run as a **server**, **checker**, **ingester**, **worker**, **alerter**, or **all**. The frontend is a React 19 + Vite SPA embedded into the server binary at build time.
 
 ## Current capabilities
 
@@ -41,7 +41,49 @@ The server process:
 - exposes the HTTP API and embedded SPA
 - receives checker submissions
 - fans submissions out to ingester and processor queues
-- runs ingester, processor, and alerter workers
+
+### Ingester mode
+
+`go run . -mode=ingester ...`
+
+The ingester process:
+
+- runs DuckDB migrations
+- consumes the ingester queue
+- writes raw monitor history
+- produces daily uptime aggregates
+
+### Worker mode
+
+`go run . -mode=worker ...`
+
+The worker process:
+
+- runs DuckDB migrations
+- consumes the processor queue
+- evaluates incident state transitions
+- publishes alert events to the alerter queue
+
+### Alerter mode
+
+`go run . -mode=alerter ...`
+
+The alerter process:
+
+- consumes the alerter queue
+- delivers alerts through configured notifiers
+
+### All mode
+
+`go run . -mode=all ...`
+
+The all-in-one process keeps the previous combined behavior:
+
+- runs DuckDB migrations
+- exposes the HTTP API and embedded SPA
+- receives checker submissions
+- fans submissions out to ingester and processor queues
+- runs ingester, worker, and alerter processes in the same binary
 
 ### Checker mode
 
@@ -121,13 +163,27 @@ Example Sentry configuration is included in `example_configurations/server.examp
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Node.js 22+
 
-### Run the server
+### Run the all-in-one stack
+
+```bash
+go run . -mode=all -config=./example_configurations/server.example.yaml -monitor=./example_configurations/monitor.example.yaml
+```
+
+### Run the HTTP server only
 
 ```bash
 go run . -mode=server -config=./example_configurations/server.example.yaml -monitor=./example_configurations/monitor.example.yaml
+```
+
+### Run standalone background processes
+
+```bash
+go run . -mode=ingester -config=./example_configurations/server.example.yaml -monitor=./example_configurations/monitor.example.yaml
+go run . -mode=worker -config=./example_configurations/server.example.yaml -monitor=./example_configurations/monitor.example.yaml
+go run . -mode=alerter -config=./example_configurations/server.example.yaml
 ```
 
 ### Run one or more checkers
@@ -163,7 +219,7 @@ npm run build
 
 ## DuckDB recovery note
 
-If server mode fails during startup with a DuckDB error like `Failure while replaying WAL file ... GetDefaultDatabase with no default database set`, DuckDB is crashing while recovering `database.db.wal` before Eyrie can run migrations.
+If a server-side mode (`server`, `ingester`, `worker`, or `all`) fails during startup with a DuckDB error like `Failure while replaying WAL file ... GetDefaultDatabase with no default database set`, DuckDB is crashing while recovering `database.db.wal` before Eyrie can run migrations.
 
 1. Back up both the main database file and its WAL first.
 2. If the WAL only contains disposable recent writes, remove the `.wal` file and restart Eyrie.

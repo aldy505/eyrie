@@ -8,7 +8,7 @@ RUN npm ci --loglevel=http && \
     npm run build && \
     rm -rf node_modules
 
-FROM golang:1.25.5-trixie@sha256:8e8f9c84609b6005af0a4a8227cee53d6226aab1c6dcb22daf5aeeb8b05480e1 AS backend
+FROM golang:1.26.3-trixie@sha256:d08bf3ed2bd263088ca8e23fefaf10f1b71769f6932f0a4017ba28d2a5baf001 AS backend
 
 WORKDIR /usr/src/eyrie
 
