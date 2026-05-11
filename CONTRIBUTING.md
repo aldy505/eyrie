@@ -4,7 +4,7 @@ Thanks for contributing to Eyrie.
 
 ## Toolchain
 
-- Go 1.25+
+- Go 1.26+
 - Node.js 22+
 
 The frontend is a Vite app. If you prefer Bun or another JS runtime for local frontend work, that is fine as long as the committed output matches the existing project structure.

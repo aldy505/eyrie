@@ -106,6 +106,8 @@ type allModeRunner struct {
 	closeOnce       sync.Once
 }
 
+const queueShutdownTimeout = 10 * time.Second
+
 func runMode(ctx context.Context, cancel context.CancelFunc, exitSignal <-chan os.Signal, mode string, runner modeRunner) error {
 	shutdownResult := make(chan error, 1)
 	go func() {
@@ -209,7 +211,7 @@ func loadCheckerConfig(configPath string) (CheckerConfig, error) {
 }
 
 func initSentryClient(config sentryRuntimeConfig) error {
-	err := sentry.Init(sentry.ClientOptions{
+	if err := sentry.Init(sentry.ClientOptions{
 		Dsn:                  config.Dsn,
 		SampleRate:           config.ErrorSampleRate,
 		EnableTracing:        true,
@@ -218,7 +220,9 @@ func initSentryClient(config sentryRuntimeConfig) error {
 		Debug:                config.Debug,
 		Release:              Version,
 		PropagateTraceparent: true,
-	})
+	}); err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	handler := sentryslog.Option{
@@ -226,9 +230,8 @@ func initSentryClient(config sentryRuntimeConfig) error {
 		LogLevel:   []slog.Level{slog.LevelWarn, slog.LevelInfo},         // Only Warn and Info as logs
 	}.NewSentryHandler(ctx)
 
-	slog.SetDefault(slog.New(slog.NewMultiHandler(handler, slog.NewTextHandler(nil, nil))))
-
-	return err
+	slog.SetDefault(slog.New(slog.NewMultiHandler(handler, slog.NewTextHandler(os.Stderr, nil))))
+	return nil
 }
 
 func flushSentry() {
@@ -318,6 +321,16 @@ func wrapShutdownError(action string, err error) error {
 	return fmt.Errorf("%s: %w", action, err)
 }
 
+func shutdownQueueResources(queues *queueResources) error {
+	if queues == nil {
+		return nil
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), queueShutdownTimeout)
+	defer shutdownCancel()
+	return queues.Shutdown(shutdownCtx)
+}
+
 func newServerModeRunner(ctx context.Context, configPath string, monitorPath string) (modeRunner, error) {
 	runtimeConfig, err := loadServerRuntimeConfig(configPath, monitorPath)
 	if err != nil {
@@ -342,13 +355,13 @@ func newServerModeRunner(ctx context.Context, configPath string, monitorPath str
 	queues := &queueResources{}
 	queues.ingesterProducer, err = openTopicResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Ingester.ProducerAddress, "ingester")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
 	queues.processorProducer, err = openTopicResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Processor.ProducerAddress, "processor")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
@@ -361,7 +374,7 @@ func newServerModeRunner(ctx context.Context, configPath string, monitorPath str
 		IngesterProducer:  queues.ingesterProducer,
 	})
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(fmt.Errorf("creating server: %w", err), closeErr)
 	}
@@ -397,10 +410,7 @@ func (r *serverModeRunner) Stop() error {
 func (r *serverModeRunner) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
-		err = errors.Join(
-			r.queues.Shutdown(context.Background()),
-			closeDatabaseRuntime(r.database),
-		)
+		err = errors.Join(shutdownQueueResources(r.queues), closeDatabaseRuntime(r.database))
 		flushSentry()
 	})
 	return err
@@ -481,7 +491,7 @@ func newIngesterModeRunner(ctx context.Context, configPath string, monitorPath s
 	queues := &queueResources{}
 	queues.ingesterSubscriber, err = openSubscriptionResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Ingester.ConsumerAddress, "ingester")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
@@ -508,10 +518,7 @@ func (r *ingesterModeRunner) Stop() error {
 func (r *ingesterModeRunner) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
-		err = errors.Join(
-			r.queues.Shutdown(context.Background()),
-			closeDatabaseRuntime(r.database),
-		)
+		err = errors.Join(shutdownQueueResources(r.queues), closeDatabaseRuntime(r.database))
 		flushSentry()
 	})
 	return err
@@ -541,13 +548,13 @@ func newWorkerModeRunner(ctx context.Context, configPath string, monitorPath str
 	queues := &queueResources{}
 	queues.alerterProducer, err = openTopicResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Alerter.ProducerAddress, "alerter")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
 	queues.processorSubscriber, err = openSubscriptionResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Processor.ConsumerAddress, "processor")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
@@ -574,10 +581,7 @@ func (r *workerModeRunner) Stop() error {
 func (r *workerModeRunner) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
-		err = errors.Join(
-			r.queues.Shutdown(context.Background()),
-			closeDatabaseRuntime(r.database),
-		)
+		err = errors.Join(shutdownQueueResources(r.queues), closeDatabaseRuntime(r.database))
 		flushSentry()
 	})
 	return err
@@ -601,7 +605,7 @@ func newAlerterModeRunner(ctx context.Context, configPath string) (modeRunner, e
 	queues := &queueResources{}
 	queues.alerterSubscriber, err = openSubscriptionResource(ctx, serverConfig.TaskQueue.Alerter.ConsumerAddress, "alerter")
 	if err != nil {
-		closeErr := queues.Shutdown(context.Background())
+		closeErr := shutdownQueueResources(queues)
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
@@ -627,7 +631,7 @@ func (r *alerterModeRunner) Stop() error {
 func (r *alerterModeRunner) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
-		err = r.queues.Shutdown(context.Background())
+		err = shutdownQueueResources(r.queues)
 		flushSentry()
 	})
 	return err
@@ -657,37 +661,37 @@ func newAllModeRunner(ctx context.Context, configPath string, monitorPath string
 	queues := &queueResources{}
 	queues.ingesterProducer, err = openTopicResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Ingester.ProducerAddress, "ingester")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
 	queues.processorProducer, err = openTopicResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Processor.ProducerAddress, "processor")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
 	queues.alerterProducer, err = openTopicResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Alerter.ProducerAddress, "alerter")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
 	queues.ingesterSubscriber, err = openSubscriptionResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Ingester.ConsumerAddress, "ingester")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
 	queues.processorSubscriber, err = openSubscriptionResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Processor.ConsumerAddress, "processor")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
 	queues.alerterSubscriber, err = openSubscriptionResource(ctx, runtimeConfig.ServerConfig.TaskQueue.Alerter.ConsumerAddress, "alerter")
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(err, closeErr)
 	}
@@ -700,7 +704,7 @@ func newAllModeRunner(ctx context.Context, configPath string, monitorPath string
 		IngesterProducer:  queues.ingesterProducer,
 	})
 	if err != nil {
-		closeErr := errors.Join(queues.Shutdown(context.Background()), closeDatabaseRuntime(database))
+		closeErr := errors.Join(shutdownQueueResources(queues), closeDatabaseRuntime(database))
 		flushSentry()
 		return nil, errors.Join(fmt.Errorf("creating server: %w", err), closeErr)
 	}
@@ -772,10 +776,7 @@ func (r *allModeRunner) Stop() error {
 func (r *allModeRunner) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
-		err = errors.Join(
-			r.queues.Shutdown(context.Background()),
-			closeDatabaseRuntime(r.database),
-		)
+		err = errors.Join(shutdownQueueResources(r.queues), closeDatabaseRuntime(r.database))
 		flushSentry()
 	})
 	return err

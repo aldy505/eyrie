@@ -163,7 +163,7 @@ Example Sentry configuration is included in `example_configurations/server.examp
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Node.js 22+
 
 ### Run the all-in-one stack

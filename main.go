@@ -17,12 +17,6 @@ func main() {
 	monitorPath := flag.String("monitor", "monitor.yaml", "Path to monitor file (required for server, ingester, worker, and all modes)")
 	flag.Parse()
 
-	if mode == nil {
-		slog.Error("mode flag is required")
-		os.Exit(1)
-		return
-	}
-
 	exitSignal := make(chan os.Signal, 1)
 	signal.Notify(exitSignal, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(exitSignal)
