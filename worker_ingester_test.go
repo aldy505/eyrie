@@ -9,6 +9,12 @@ import (
 	"github.com/guregu/null/v5"
 )
 
+func dirtyAggregationTaskCount(w *IngesterWorker) int {
+	w.dirtyAggregationMu.Lock()
+	defer w.dirtyAggregationMu.Unlock()
+	return len(w.dirtyAggregationTasks)
+}
+
 func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
@@ -480,6 +486,114 @@ func TestIngesterWorker_AggregateDailyMonitorHistoricalSkipsUnknownMonitorConfig
 	}
 	if count != 0 {
 		t.Fatalf("expected no aggregate row for missing monitor config, got %d", count)
+	}
+}
+
+func TestIngesterWorker_AggregateDirtyMonitorsProcessesTouchedMonitorDates(t *testing.T) {
+	monitorID := "test-aggregate-dirty-monitor"
+	testDate1 := time.Date(2025, 1, 24, 8, 15, 0, 0, time.UTC)
+	testDate2 := testDate1.Add(24 * time.Hour)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		for _, query := range []string{
+			`DELETE FROM monitor_historical WHERE monitor_id = ?`,
+			`DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`,
+			`DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`,
+		} {
+			if _, err := conn.ExecContext(ctx, query, monitorID); err != nil {
+				t.Fatalf("failed to clean up monitor tables: %v", err)
+			}
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:         db,
+		subscriber: nil,
+		monitorConfig: MonitorConfig{
+			Monitors: []Monitor{
+				{
+					ID:                  monitorID,
+					ExpectedStatusCodes: []int{200},
+				},
+			},
+		},
+		shutdown:              make(chan struct{}),
+		dirtyAggregationTasks: make(map[string]aggregationTask),
+	}
+
+	submissions := []CheckerSubmissionRequest{
+		{MonitorID: monitorID, LatencyMs: 100, StatusCode: 200, Timestamp: testDate1, Timings: CheckerTraceTimings{}},
+		{MonitorID: monitorID, LatencyMs: 200, StatusCode: 200, Timestamp: testDate1.Add(30 * time.Minute), Timings: CheckerTraceTimings{}},
+		{MonitorID: monitorID, LatencyMs: 300, StatusCode: 500, Timestamp: testDate2, Timings: CheckerTraceTimings{}},
+	}
+
+	for _, submission := range submissions {
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest monitor historical: %v", err)
+		}
+	}
+
+	if got := dirtyAggregationTaskCount(ingesterWorker); got != 2 {
+		t.Fatalf("expected 2 dirty aggregation tasks, got %d", got)
+	}
+
+	ingesterWorker.aggregateDirtyMonitors()
+
+	if got := dirtyAggregationTaskCount(ingesterWorker); got != 0 {
+		t.Fatalf("expected dirty aggregation tasks to be drained, got %d", got)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for verification: %v", err)
+	}
+	defer conn.Close()
+
+	type aggregateRow struct {
+		date        string
+		successRate int
+	}
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT date, success_rate
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ?
+		ORDER BY date
+	`, monitorID)
+	if err != nil {
+		t.Fatalf("failed to query aggregate rows: %v", err)
+	}
+	defer rows.Close()
+
+	var aggregates []aggregateRow
+	for rows.Next() {
+		var row aggregateRow
+		if err := rows.Scan(&row.date, &row.successRate); err != nil {
+			t.Fatalf("failed to scan aggregate row: %v", err)
+		}
+		aggregates = append(aggregates, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("failed iterating aggregate rows: %v", err)
+	}
+
+	if len(aggregates) != 2 {
+		t.Fatalf("expected 2 aggregate rows, got %d", len(aggregates))
+	}
+	if date, err := parseAggregationDate(aggregates[0].date); err != nil || !date.Equal(normalizeAggregationDate(testDate1)) || aggregates[0].successRate != 100 {
+		t.Fatalf("unexpected first aggregate row: %+v", aggregates[0])
+	}
+	if date, err := parseAggregationDate(aggregates[1].date); err != nil || !date.Equal(normalizeAggregationDate(testDate2)) || aggregates[1].successRate != 0 {
+		t.Fatalf("unexpected second aggregate row: %+v", aggregates[1])
 	}
 }
 

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -21,6 +23,9 @@ type IngesterWorker struct {
 	subscriber    *pubsub.Subscription
 	monitorConfig MonitorConfig
 	shutdown      chan struct{}
+
+	dirtyAggregationMu    sync.Mutex
+	dirtyAggregationTasks map[string]aggregationTask
 }
 
 func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfig MonitorConfig) *IngesterWorker {
@@ -29,7 +34,14 @@ func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfi
 		subscriber:    subscriber,
 		monitorConfig: monitorConfig,
 		shutdown:      make(chan struct{}),
+
+		dirtyAggregationTasks: make(map[string]aggregationTask),
 	}
+}
+
+type aggregationTask struct {
+	monitorID string
+	date      time.Time
 }
 
 func (w *IngesterWorker) findMonitorConfig(monitorID string) (Monitor, bool) {
@@ -145,55 +157,99 @@ func (w *IngesterWorker) runPeriodicAggregation() {
 	ticker := time.NewTicker(aggregationInterval)
 	defer ticker.Stop()
 
-	// Run once immediately on startup
-	w.aggregateAllMonitors()
+	// Seed a small recent window on startup so we can catch up after restarts
+	// without rescanning the full retention window every minute.
+	w.seedRecentAggregationTasks(48 * time.Hour)
+	w.aggregateDirtyMonitors()
 
 	for {
 		select {
 		case <-w.shutdown:
 			return
 		case <-ticker.C:
-			w.aggregateAllMonitors()
+			w.aggregateDirtyMonitors()
 		}
 	}
 }
 
-// aggregateAllMonitors aggregates data for all monitors with recent data
-func (w *IngesterWorker) aggregateAllMonitors() {
-	const aggregationLookbackDays = 30
+func normalizeAggregationDate(date time.Time) time.Time {
+	utc := date.UTC()
+	return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func aggregationTaskKey(monitorID string, date time.Time) string {
+	return fmt.Sprintf("%s|%s", monitorID, normalizeAggregationDate(date).Format("2006-01-02"))
+}
+
+func (w *IngesterWorker) enqueueAggregationTask(monitorID string, date time.Time) {
+	task := aggregationTask{
+		monitorID: monitorID,
+		date:      normalizeAggregationDate(date),
+	}
+
+	w.dirtyAggregationMu.Lock()
+	defer w.dirtyAggregationMu.Unlock()
+
+	if w.dirtyAggregationTasks == nil {
+		w.dirtyAggregationTasks = make(map[string]aggregationTask)
+	}
+	w.dirtyAggregationTasks[aggregationTaskKey(task.monitorID, task.date)] = task
+}
+
+func (w *IngesterWorker) drainAggregationTasks() []aggregationTask {
+	w.dirtyAggregationMu.Lock()
+	defer w.dirtyAggregationMu.Unlock()
+
+	if len(w.dirtyAggregationTasks) == 0 {
+		return nil
+	}
+
+	tasks := make([]aggregationTask, 0, len(w.dirtyAggregationTasks))
+	for _, task := range w.dirtyAggregationTasks {
+		tasks = append(tasks, task)
+	}
+	clear(w.dirtyAggregationTasks)
+
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].date.Equal(tasks[j].date) {
+			return tasks[i].monitorID < tasks[j].monitorID
+		}
+		return tasks[i].date.Before(tasks[j].date)
+	})
+
+	return tasks
+}
+
+// seedRecentAggregationTasks backfills a small recent window after startup so
+// the worker can recover from restarts without reprocessing the full history on
+// every aggregation tick.
+func (w *IngesterWorker) seedRecentAggregationTasks(lookback time.Duration) {
 	ctx := sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone())
-	aggregationStartedAt := time.Now()
-	span := sentry.StartTransaction(ctx, "ingester.aggregate_all", sentry.WithOpName("task.ingester.aggregate"), sentry.WithTransactionSource(sentry.SourceCustom))
+	span := sentry.StartTransaction(ctx, "ingester.seed_aggregation_tasks", sentry.WithOpName("task.ingester.aggregate_seed"), sentry.WithTransactionSource(sentry.SourceCustom))
 	ctx = span.Context()
 	defer span.Finish()
 
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
-		slog.ErrorContext(ctx, "getting db connection for aggregation", slog.String("error", err.Error()))
+		slog.ErrorContext(ctx, "getting db connection for aggregation seed", slog.String("error", err.Error()))
 		return
 	}
 	defer conn.Close()
 
-	// Get all distinct monitor IDs and dates from the last 30 days
 	rows, err := conn.QueryContext(ctx, `
 		SELECT DISTINCT 
 			monitor_id, 
 			CAST(created_at AS DATE) AS date
 		FROM monitor_historical
 		WHERE created_at >= ?
-	`, time.Now().AddDate(0, 0, -aggregationLookbackDays))
+	`, time.Now().Add(-lookback))
 	if err != nil {
-		slog.ErrorContext(ctx, "querying monitor IDs and dates for aggregation", slog.String("error", err.Error()))
+		slog.ErrorContext(ctx, "querying monitor IDs and dates for aggregation seed", slog.String("error", err.Error()))
 		return
 	}
 	defer rows.Close()
 
-	type aggregationTask struct {
-		monitorID string
-		date      time.Time
-	}
-
-	var tasks []aggregationTask
+	seeded := 0
 	for rows.Next() {
 		var monitorID string
 		var dateStr string
@@ -208,15 +264,42 @@ func (w *IngesterWorker) aggregateAllMonitors() {
 			continue
 		}
 
-		tasks = append(tasks, aggregationTask{monitorID: monitorID, date: date})
+		w.enqueueAggregationTask(monitorID, date)
+		seeded++
 	}
+
+	if err := rows.Err(); err != nil {
+		slog.ErrorContext(ctx, "iterating aggregation seed rows", slog.String("error", err.Error()))
+		return
+	}
+
+	if seeded > 0 {
+		slog.InfoContext(ctx, "seeded recent aggregation tasks", slog.Int("task_count", seeded))
+	}
+}
+
+// aggregateDirtyMonitors aggregates only monitor/date pairs that changed since
+// the last flush. This keeps aggregation work proportional to new submissions
+// instead of repeatedly rescanning historical data.
+func (w *IngesterWorker) aggregateDirtyMonitors() {
+	tasks := w.drainAggregationTasks()
+	if len(tasks) == 0 {
+		return
+	}
+
+	ctx := sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone())
+	aggregationStartedAt := time.Now()
+	span := sentry.StartTransaction(ctx, "ingester.aggregate_dirty", sentry.WithOpName("task.ingester.aggregate"), sentry.WithTransactionSource(sentry.SourceCustom))
+	ctx = span.Context()
+	defer span.Finish()
 
 	slog.InfoContext(ctx, "starting aggregation", slog.Int("task_count", len(tasks)))
 	sentry.NewMeter(context.Background()).WithCtx(ctx).Gauge("eyrie.ingester.aggregation.tasks", float64(len(tasks)))
 
-	// Aggregate each monitor/date combination
 	for _, task := range tasks {
 		if err := w.aggregateDailyMonitorHistorical(ctx, task.monitorID, task.date); err != nil {
+			w.enqueueAggregationTask(task.monitorID, task.date)
+
 			if hub := sentry.GetHubFromContext(ctx); hub != nil {
 				hub.Scope().SetTag("eyrie.monitor_id", task.monitorID)
 				hub.Scope().SetTag("eyrie.date", task.date.Format("2006-01-02"))
@@ -330,6 +413,8 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 	if err != nil {
 		return fmt.Errorf("inserting monitor historical: %w", err)
 	}
+
+	w.enqueueAggregationTask(submission.MonitorID, submission.Timestamp)
 
 	sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.ingested", 1, sentry.WithAttributes(attribute.String("probe_type", probeType), attribute.String("region", region)))
 	if submission.LatencyMs > 0 {
