@@ -145,7 +145,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber, monitorConfig)
+		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber, monitorConfig, serverConfig.Dataset)
 		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig, serverConfig.Dataset)
 		alerterWorker := NewAlerterWorker(alerterSubscriber, BuildAlerters(serverConfig))
 
