@@ -22,17 +22,19 @@ type IngesterWorker struct {
 	db            *sql.DB
 	subscriber    *pubsub.Subscription
 	monitorConfig MonitorConfig
+	datasetConfig DatasetConfig
 	shutdown      chan struct{}
 
 	dirtyAggregationMu    sync.Mutex
 	dirtyAggregationTasks map[string]aggregationTask
 }
 
-func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfig MonitorConfig) *IngesterWorker {
+func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfig MonitorConfig, datasetConfig DatasetConfig) *IngesterWorker {
 	return &IngesterWorker{
 		db:            db,
 		subscriber:    subscriber,
 		monitorConfig: monitorConfig,
+		datasetConfig: datasetConfig,
 		shutdown:      make(chan struct{}),
 
 		dirtyAggregationTasks: make(map[string]aggregationTask),
@@ -157,9 +159,10 @@ func (w *IngesterWorker) runPeriodicAggregation() {
 	ticker := time.NewTicker(aggregationInterval)
 	defer ticker.Stop()
 
-	// Seed a small recent window on startup so we can catch up after restarts
-	// without rescanning the full retention window every minute.
-	w.seedRecentAggregationTasks(48 * time.Hour)
+	// Seed the configured retention window on startup so missed aggregate work is
+	// reconciled after longer outages without reintroducing the historical rescan
+	// on every aggregation tick.
+	w.seedRecentAggregationTasks(w.aggregationSeedLookback())
 	w.aggregateDirtyMonitors()
 
 	for {
@@ -179,6 +182,14 @@ func normalizeAggregationDate(date time.Time) time.Time {
 
 func aggregationTaskKey(monitorID string, date time.Time) string {
 	return fmt.Sprintf("%s|%s", monitorID, normalizeAggregationDate(date).Format("2006-01-02"))
+}
+
+func (w *IngesterWorker) aggregationSeedLookback() time.Duration {
+	days := w.datasetConfig.RetentionDays
+	if days <= 0 {
+		days = 30
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 func (w *IngesterWorker) enqueueAggregationTask(monitorID string, date time.Time) {
@@ -242,7 +253,7 @@ func (w *IngesterWorker) seedRecentAggregationTasks(lookback time.Duration) {
 			CAST(created_at AS DATE) AS date
 		FROM monitor_historical
 		WHERE created_at >= ?
-	`, time.Now().Add(-lookback))
+	`, time.Now().UTC().Add(-lookback))
 	if err != nil {
 		slog.ErrorContext(ctx, "querying monitor IDs and dates for aggregation seed", slog.String("error", err.Error()))
 		return

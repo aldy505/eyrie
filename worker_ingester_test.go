@@ -15,6 +15,18 @@ func dirtyAggregationTaskCount(w *IngesterWorker) int {
 	return len(w.dirtyAggregationTasks)
 }
 
+func TestIngesterWorker_AggregationSeedLookbackUsesRetentionDays(t *testing.T) {
+	worker := &IngesterWorker{datasetConfig: DatasetConfig{RetentionDays: 7}}
+	if got := worker.aggregationSeedLookback(); got != 7*24*time.Hour {
+		t.Fatalf("expected 7 day seed lookback, got %s", got)
+	}
+
+	worker = &IngesterWorker{}
+	if got := worker.aggregationSeedLookback(); got != 30*24*time.Hour {
+		t.Fatalf("expected default 30 day seed lookback, got %s", got)
+	}
+}
+
 func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
