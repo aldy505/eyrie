@@ -103,6 +103,7 @@ func (s *Server) RootHandler(spa *spaHandler) http.HandlerFunc {
 		}
 
 		if classifyRootRequest(r.UserAgent()) == rootRequestAudienceBrowser {
+			setRootVaryHeaders(w.Header())
 			spa.serveIndex(w, r)
 			return
 		}
@@ -130,10 +131,12 @@ func (s *Server) RootHandler(spa *spaHandler) http.HandlerFunc {
 
 		switch format {
 		case rootCLIFormatText:
+			setRootCLIHeaders(w.Header())
 			w.Header().Set("content-type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(renderRootStatusText(response)))
 		default:
+			setRootCLIHeaders(w.Header())
 			w.Header().Set("content-type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			encoder := json.NewEncoder(w)
@@ -141,6 +144,16 @@ func (s *Server) RootHandler(spa *spaHandler) http.HandlerFunc {
 			_ = encoder.Encode(response)
 		}
 	}
+}
+
+func setRootVaryHeaders(header http.Header) {
+	header.Add("Vary", "User-Agent")
+	header.Add("Vary", "Accept")
+}
+
+func setRootCLIHeaders(header http.Header) {
+	setRootVaryHeaders(header)
+	header.Set("Cache-Control", "no-store")
 }
 
 func classifyRootRequest(userAgent string) rootRequestAudience {
@@ -177,10 +190,12 @@ func resolveRootCLIFormat(r *http.Request) rootCLIFormat {
 func writeRootError(w http.ResponseWriter, format rootCLIFormat, statusCode int, message string) {
 	switch format {
 	case rootCLIFormatText:
+		setRootCLIHeaders(w.Header())
 		w.Header().Set("content-type", "text/plain; charset=utf-8")
 		w.WriteHeader(statusCode)
 		_, _ = fmt.Fprintf(w, "Error: %s\n", message)
 	default:
+		setRootCLIHeaders(w.Header())
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(statusCode)
 		encoder := json.NewEncoder(w)

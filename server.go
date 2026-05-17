@@ -106,7 +106,8 @@ func NewServer(options ServerOptions) (*Server, error) {
 		mux.Handle("/debug/pprof/", http.DefaultServeMux)
 	}
 	spa := &spaHandler{fileSystem: distFS, indexFile: "index.html"}
-	mux.Handle("/", sentryMiddleware.HandleFunc(s.RootHandler(spa)))
+	mux.Handle("GET /{$}", sentryMiddleware.HandleFunc(s.RootHandler(spa)))
+	mux.Handle("/", spa)
 
 	srv := &http.Server{
 		Addr:    net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
@@ -661,9 +662,17 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 
 	response, err := s.buildMonitorIncidentsResponse(ctx)
 	if err != nil {
+		message := "failed to build incidents response"
+		switch {
+		case strings.HasPrefix(err.Error(), "failed to fetch monitor ids"):
+			message = "failed to fetch monitor ids"
+		case strings.HasPrefix(err.Error(), "failed to load incident state"):
+			message = "failed to load incident state"
+		}
+
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: message})
 		return
 	}
 

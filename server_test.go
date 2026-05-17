@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,9 @@ func TestServerRootBrowserUserAgentServesHTML(t *testing.T) {
 	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
 		t.Fatalf("expected HTML content type, got %q", got)
 	}
+	if got := recorder.Header().Values("Vary"); !slices.Equal(got, []string{"User-Agent", "Accept"}) {
+		t.Fatalf("expected Vary headers for browser root response, got %v", got)
+	}
 }
 
 func TestServerRootCLIUserAgentServesPrettyJSON(t *testing.T) {
@@ -150,6 +154,12 @@ func TestServerRootCLIUserAgentServesPrettyJSON(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("expected JSON content type, got %q", got)
+	}
+	if got := recorder.Header().Values("Vary"); !slices.Equal(got, []string{"User-Agent", "Accept"}) {
+		t.Fatalf("expected Vary headers for CLI root response, got %v", got)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("expected no-store cache control for CLI root response, got %q", got)
 	}
 	if !strings.Contains(recorder.Body.String(), "\n  \"format\": \"json\"") {
 		t.Fatalf("expected pretty-printed JSON body, got %q", recorder.Body.String())
