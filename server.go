@@ -469,6 +469,11 @@ type MonitorIncidentsResponse struct {
 	Incidents   []MonitorIncidentSummary `json:"incidents"`
 }
 
+var (
+	errMonitorIncidentsFetchMonitorIDs = errors.New("failed to fetch monitor ids")
+	errMonitorIncidentsLoadState       = errors.New("failed to load incident state")
+)
+
 func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -664,9 +669,9 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		message := "failed to build incidents response"
 		switch {
-		case strings.HasPrefix(err.Error(), "failed to fetch monitor ids"):
+		case errors.Is(err, errMonitorIncidentsFetchMonitorIDs):
 			message = "failed to fetch monitor ids"
-		case strings.HasPrefix(err.Error(), "failed to load incident state"):
+		case errors.Is(err, errMonitorIncidentsLoadState):
 			message = "failed to load incident state"
 		}
 
@@ -684,7 +689,7 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 func (s *Server) buildMonitorIncidentsResponse(ctx context.Context) (MonitorIncidentsResponse, error) {
 	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
 	if err != nil {
-		return MonitorIncidentsResponse{}, fmt.Errorf("failed to fetch monitor ids: %w", err)
+		return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsFetchMonitorIDs, err)
 	}
 
 	incidents := make([]MonitorIncidentSummary, 0, len(monitorMetadata))
@@ -692,17 +697,17 @@ func (s *Server) buildMonitorIncidentsResponse(ctx context.Context) (MonitorInci
 		monitorConfig, err := s.findMonitorConfig(metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load monitor config for incidents response", "monitor_id", metadata.ID, "error", err)
-			return MonitorIncidentsResponse{}, fmt.Errorf("failed to load incident state: %w", err)
+			return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsLoadState, err)
 		}
 		state, err := s.fetchIncidentState(ctx, metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load incident state for monitor", "monitor_id", metadata.ID, "error", err)
-			return MonitorIncidentsResponse{}, fmt.Errorf("failed to load incident state: %w", err)
+			return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsLoadState, err)
 		}
 		activeIncident, activeFound, err := s.fetchActiveIncident(ctx, metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load active incident for monitor", "monitor_id", metadata.ID, "error", err)
-			return MonitorIncidentsResponse{}, fmt.Errorf("failed to load incident state: %w", err)
+			return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsLoadState, err)
 		}
 
 		summary := MonitorIncidentSummary{
