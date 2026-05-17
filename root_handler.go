@@ -97,6 +97,10 @@ func (s *Server) RootHandler(spa *spaHandler) http.HandlerFunc {
 			spa.ServeHTTP(w, r)
 			return
 		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			spa.ServeHTTP(w, r)
+			return
+		}
 
 		if classifyRootRequest(r.UserAgent()) == rootRequestAudienceBrowser {
 			spa.serveIndex(w, r)
@@ -420,14 +424,15 @@ func formatRootLatency(latencyMs int64) string {
 }
 
 func truncateRootText(value string, max int) string {
-	if len(value) <= max {
+	runes := []rune(value)
+	if len(runes) <= max {
 		return value
 	}
 	if max <= 3 {
-		return value[:max]
+		return string(runes[:max])
 	}
 
-	return value[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }
 
 func firstNonEmpty(values ...string) string {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/guregu/null/v5"
 	"golang.org/x/sync/semaphore"
@@ -214,6 +215,23 @@ func TestServerRootTextFormatCanBeRequestedByCLIClients(t *testing.T) {
 	}
 }
 
+func TestServerRootNonGETMethodsStillUseSPAFallback(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.Header.Set("User-Agent", "curl/8.7.1")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected HTML content type, got %q", got)
+	}
+}
+
 func TestServerNonRootPathsStillUseSPAFallbackForCLIClients(t *testing.T) {
 	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
 
@@ -228,6 +246,18 @@ func TestServerNonRootPathsStillUseSPAFallbackForCLIClients(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
 		t.Fatalf("expected HTML content type, got %q", got)
+	}
+}
+
+func TestTruncateRootTextPreservesUTF8(t *testing.T) {
+	value := "東京サービス監視"
+	truncated := truncateRootText(value, 6)
+
+	if truncated != "東京サ..." {
+		t.Fatalf("expected rune-safe truncation, got %q", truncated)
+	}
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("expected valid UTF-8 output, got %q", truncated)
 	}
 }
 
