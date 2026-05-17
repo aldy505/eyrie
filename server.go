@@ -105,7 +105,8 @@ func NewServer(options ServerOptions) (*Server, error) {
 	if os.Getenv("ENABLE_PPROF_ENDPOINT") == "1" {
 		mux.Handle("/debug/pprof/", http.DefaultServeMux)
 	}
-	mux.Handle("/", SpaHandler(distFS, "index.html"))
+	spa := &spaHandler{fileSystem: distFS, indexFile: "index.html"}
+	mux.Handle("/", sentryMiddleware.HandleFunc(s.RootHandler(spa)))
 
 	srv := &http.Server{
 		Addr:    net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
@@ -349,7 +350,7 @@ func (s *Server) withDuckDBReadPermit(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		if err := s.duckDBReadLimiter.Acquire(r.Context(), 1); err != nil {
+		if err := s.acquireDuckDBReadPermit(r.Context()); err != nil {
 			if hub := sentry.GetHubFromContext(r.Context()); hub != nil {
 				hub.CaptureException(fmt.Errorf("acquiring duckdb read permit: %w", err))
 			}
@@ -365,6 +366,14 @@ func (s *Server) withDuckDBReadPermit(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r)
 	}
+}
+
+func (s *Server) acquireDuckDBReadPermit(ctx context.Context) error {
+	if s.duckDBReadLimiter == nil {
+		return nil
+	}
+
+	return s.duckDBReadLimiter.Acquire(ctx, 1)
 }
 
 type CommonErrorResponse struct {
@@ -462,12 +471,12 @@ type MonitorIncidentsResponse struct {
 func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	response, err := s.buildUptimeDataResponse(ctx)
 	if err != nil {
 		if hub := sentry.GetHubFromContext(ctx); hub != nil {
-			hub.CaptureException(fmt.Errorf("fetching valid monitor ids: %w", err))
+			hub.CaptureException(fmt.Errorf("building uptime data response: %w", err))
 		}
-		slog.ErrorContext(ctx, "fetching valid monitor ids", slog.String("error", err.Error()))
+		slog.ErrorContext(ctx, "building uptime data response", slog.String("error", err.Error()))
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
@@ -476,18 +485,29 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandlerResponse, error) {
+	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	if err != nil {
+		return UptimeDataHandlerResponse{}, err
+	}
+
 	wg := sync.WaitGroup{}
 	mutex := sync.Mutex{}
 	m := make(map[string]UptimeDataHistorical)
 
 	for _, monitor := range monitorMetadata {
 		wg.Go(func() {
-			historical, err := s.fetchFromRawMonitorHistorical(ctx, monitor.ID)
-			if err != nil {
+			historical, historicalErr := s.fetchFromRawMonitorHistorical(ctx, monitor.ID)
+			if historicalErr != nil {
 				if hub := sentry.GetHubFromContext(ctx); hub != nil {
-					hub.CaptureException(fmt.Errorf("fetching monitor historical for monitor %s: %w", monitor.ID, err))
+					hub.CaptureException(fmt.Errorf("fetching monitor historical for monitor %s: %w", monitor.ID, historicalErr))
 				}
-				slog.ErrorContext(ctx, "fetching monitor historical", slog.String("monitor_id", monitor.ID), slog.String("error", err.Error()))
+				slog.ErrorContext(ctx, "fetching monitor historical", slog.String("monitor_id", monitor.ID), slog.String("error", historicalErr.Error()))
 				return
 			}
 
@@ -500,25 +520,21 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	response := UptimeDataHandlerResponse{
-		LastUpdated: time.Now(),
+		LastUpdated: time.Now().UTC(),
 		Monitors:    []UptimeDataHandlerMonitorGroup{},
 	}
 	var uptimeDataHandlerMonitorGroup []UptimeDataHandlerMonitorGroup
 
-	// Build an index for monitor metadata to avoid O(n*m) lookups
 	monitorIndexByID := make(map[string]int, len(monitorMetadata))
 	for i, monitor := range monitorMetadata {
 		monitorIndexByID[monitor.ID] = i
 	}
 
-	// Prioritize group first
 	for _, group := range s.monitorConfig.Groups {
 		var groupMonitors []UptimeDataHandlerSingleMonitor
-		for _, monitorId := range group.MonitorIDs {
-			slog.InfoContext(ctx, "Trying to find monitor id: "+monitorId)
-			if idx, ok := monitorIndexByID[monitorId]; ok {
+		for _, monitorID := range group.MonitorIDs {
+			if idx, ok := monitorIndexByID[monitorID]; ok {
 				monitor := monitorMetadata[idx]
-				slog.InfoContext(ctx, "Found monitor ID "+monitor.ID+" for group ID "+group.ID)
 				if historical, exists := m[monitor.ID]; exists {
 					groupMonitors = append(groupMonitors, UptimeDataHandlerSingleMonitor{
 						ID:             monitor.ID,
@@ -539,14 +555,12 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 			Description: group.Description,
 			Monitors:    groupMonitors,
 		})
-		slog.InfoContext(ctx, "Added group ID into the response.Monitors")
 	}
 
-	// Then add single monitors that are not part of any group
 	monitorsInGroups := make(map[string]bool)
 	for _, group := range s.monitorConfig.Groups {
-		for _, monitorId := range group.MonitorIDs {
-			monitorsInGroups[monitorId] = true
+		for _, monitorID := range group.MonitorIDs {
+			monitorsInGroups[monitorID] = true
 		}
 	}
 
@@ -581,9 +595,7 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	response.Monitors = uptimeDataHandlerMonitorGroup
 
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(response)
+	return response, nil
 }
 
 func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Request) {
@@ -647,12 +659,23 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	response, err := s.buildMonitorIncidentsResponse(ctx)
 	if err != nil {
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to fetch monitor ids"})
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
 		return
+	}
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) buildMonitorIncidentsResponse(ctx context.Context) (MonitorIncidentsResponse, error) {
+	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	if err != nil {
+		return MonitorIncidentsResponse{}, fmt.Errorf("failed to fetch monitor ids: %w", err)
 	}
 
 	incidents := make([]MonitorIncidentSummary, 0, len(monitorMetadata))
@@ -660,26 +683,17 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 		monitorConfig, err := s.findMonitorConfig(metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load monitor config for incidents response", "monitor_id", metadata.ID, "error", err)
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
-			return
+			return MonitorIncidentsResponse{}, fmt.Errorf("failed to load incident state: %w", err)
 		}
 		state, err := s.fetchIncidentState(ctx, metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load incident state for monitor", "monitor_id", metadata.ID, "error", err)
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
-			return
+			return MonitorIncidentsResponse{}, fmt.Errorf("failed to load incident state: %w", err)
 		}
 		activeIncident, activeFound, err := s.fetchActiveIncident(ctx, metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load active incident for monitor", "monitor_id", metadata.ID, "error", err)
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
-			return
+			return MonitorIncidentsResponse{}, fmt.Errorf("failed to load incident state: %w", err)
 		}
 
 		summary := MonitorIncidentSummary{
@@ -711,12 +725,10 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 		return strings.Compare(a.MonitorID, b.MonitorID)
 	})
 
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(MonitorIncidentsResponse{
+	return MonitorIncidentsResponse{
 		LastUpdated: time.Now().UTC(),
 		Incidents:   incidents,
-	})
+	}, nil
 }
 
 func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorMetadata, error) {
@@ -1275,7 +1287,14 @@ type ConfigHandlerResponse struct {
 }
 
 func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
-	response := ConfigHandlerResponse{
+	response := s.buildConfigResponse()
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) buildConfigResponse() ConfigHandlerResponse {
+	return ConfigHandlerResponse{
 		Title:                               s.serverConfig.Metadata.Title,
 		ShowLastUpdated:                     s.serverConfig.Metadata.ShowLastUpdated,
 		RetentionDays:                       s.serverConfig.Dataset.RetentionDays,
@@ -1283,8 +1302,4 @@ func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 		DegradedThresholdConsecutiveBuckets: s.serverConfig.Dataset.DegradedThresholdConsecutiveBuckets,
 		FailureThresholdMinutes:             s.serverConfig.Dataset.FailureThresholdMinutes,
 	}
-
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(response)
 }

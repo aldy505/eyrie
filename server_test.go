@@ -111,6 +111,264 @@ func TestServerPprofEndpointIsEnabledWithEnvVar(t *testing.T) {
 	}
 }
 
+func TestServerRootBrowserUserAgentServesHTML(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("User-Agent", "Mozilla/5.0")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected HTML content type, got %q", got)
+	}
+}
+
+func TestServerRootCLIUserAgentServesPrettyJSON(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{
+		MonitorID:     "root-json-monitor",
+		MonitorName:   "CLI JSON Monitor",
+		MonitorStatus: MonitorStatusDegraded,
+		MonitorScope:  MonitorScopeLocal,
+		Reason:        "Latency spike detected",
+		SeedEvent:     true,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("User-Agent", "curl/8.7.1")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected JSON content type, got %q", got)
+	}
+	if !strings.Contains(recorder.Body.String(), "\n  \"format\": \"json\"") {
+		t.Fatalf("expected pretty-printed JSON body, got %q", recorder.Body.String())
+	}
+
+	var payload RootStatusResponse
+	if err := json.NewDecoder(strings.NewReader(recorder.Body.String())).Decode(&payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Format != "json" {
+		t.Fatalf("expected format=json, got %q", payload.Format)
+	}
+	if payload.Summary.Services != 1 {
+		t.Fatalf("expected 1 service in summary, got %d", payload.Summary.Services)
+	}
+	if len(payload.RecentEvents) != 1 {
+		t.Fatalf("expected 1 recent event, got %d", len(payload.RecentEvents))
+	}
+	if payload.Services[0].Status != MonitorStatusDegraded {
+		t.Fatalf("expected degraded service status, got %q", payload.Services[0].Status)
+	}
+}
+
+func TestServerRootMissingUserAgentDefaultsToCLIJSON(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected JSON content type, got %q", got)
+	}
+}
+
+func TestServerRootTextFormatCanBeRequestedByCLIClients(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{
+		MonitorID:     "root-text-monitor",
+		MonitorName:   "CLI Text Monitor",
+		MonitorStatus: MonitorStatusDown,
+		MonitorScope:  MonitorScopeGlobal,
+		Reason:        "Connection timeout",
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/?format=text", nil)
+	request.Header.Set("User-Agent", "wget/1.21")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("expected text content type, got %q", got)
+	}
+	if !strings.Contains(recorder.Body.String(), "Summary") {
+		t.Fatalf("expected summary section in text response, got %q", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "Connection timeout") {
+		t.Fatalf("expected incident reason in text response, got %q", recorder.Body.String())
+	}
+}
+
+func TestServerNonRootPathsStillUseSPAFallbackForCLIClients(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodGet, "/status/overview", nil)
+	request.Header.Set("User-Agent", "curl/8.7.1")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected HTML content type, got %q", got)
+	}
+}
+
+type rootStatusTestSeedOptions struct {
+	MonitorID     string
+	MonitorName   string
+	MonitorStatus string
+	MonitorScope  string
+	Reason        string
+	SeedEvent     bool
+}
+
+func newRootStatusTestServer(t *testing.T, options rootStatusTestSeedOptions) *Server {
+	t.Helper()
+
+	monitorID := options.MonitorID
+	if monitorID == "" {
+		monitorID = "root-status-monitor"
+	}
+
+	monitorName := options.MonitorName
+	if monitorName == "" {
+		monitorName = "Root Status Monitor"
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	cleanupRootStatusTestData(t, monitorID)
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                monitorName,
+				Description:         null.StringFrom("root endpoint test monitor"),
+				ExpectedStatusCodes: []int{200},
+				HTTP: &MonitorHTTPConfig{
+					URL: "https://example.com",
+				},
+			},
+		},
+	}
+
+	if options.MonitorStatus != "" {
+		conn, err := db.Conn(t.Context())
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+
+		ingesterWorker := &IngesterWorker{
+			db:            db,
+			monitorConfig: monitorConfig,
+			shutdown:      make(chan struct{}),
+		}
+
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			Success:    true,
+			LatencyMs:  123,
+			StatusCode: 200,
+			Timestamp:  now,
+			Timings:    CheckerTraceTimings{},
+		}
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to seed monitor historical: %v", err)
+		}
+
+		scope := options.MonitorScope
+		if scope == "" {
+			scope = MonitorScopeHealthy
+		}
+		if _, err := conn.ExecContext(t.Context(), `
+			INSERT INTO monitor_incident_state (
+				monitor_id, status, scope, affected_regions, reason, last_transition_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, monitorID, options.MonitorStatus, scope, `["us-east-1"]`, options.Reason, now, now); err != nil {
+			t.Fatalf("failed to seed monitor_incident_state: %v", err)
+		}
+
+		if options.SeedEvent {
+			if _, err := conn.ExecContext(t.Context(), `
+				INSERT INTO monitor_incident_events (
+					id, incident_id, monitor_id, event_type, source, lifecycle_state, impact, title, body, status, scope, affected_regions, created_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, monitorID+"-event", monitorID+"-incident", monitorID, IncidentEventTypeUpdated, IncidentSourceProgrammatic, IncidentLifecycleMonitoring, IncidentImpactPartialOutage, "Latency spike", options.Reason, options.MonitorStatus, scope, `["us-east-1"]`, now); err != nil {
+				t.Fatalf("failed to seed monitor_incident_events: %v", err)
+			}
+		}
+	}
+
+	serverConfig := ServerConfig{}
+	serverConfig.Metadata.Title = "Root Status Test"
+
+	server, err := NewServer(ServerOptions{
+		Database:      db,
+		ServerConfig:  serverConfig,
+		MonitorConfig: monitorConfig,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.CloseCaches(); err != nil {
+			t.Fatalf("failed to close caches: %v", err)
+		}
+		cleanupRootStatusTestData(t, monitorID)
+	})
+
+	return server
+}
+
+func cleanupRootStatusTestData(t *testing.T, monitorID string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection: %v", err)
+	}
+	defer conn.Close()
+
+	statements := []string{
+		`DELETE FROM monitor_incident_events WHERE monitor_id = ?`,
+		`DELETE FROM monitor_incidents WHERE monitor_id = ?`,
+		`DELETE FROM monitor_incident_state WHERE monitor_id = ?`,
+		`DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`,
+		`DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`,
+		`DELETE FROM monitor_historical WHERE monitor_id = ?`,
+	}
+
+	for _, statement := range statements {
+		if _, err := conn.ExecContext(ctx, statement, monitorID); err != nil {
+			t.Fatalf("failed to clean up root status test data: %v", err)
+		}
+	}
+}
+
 func TestServerWithDuckDBReadPermitWaitsForPermit(t *testing.T) {
 	server := &Server{
 		duckDBReadLimiter: semaphore.NewWeighted(1),
