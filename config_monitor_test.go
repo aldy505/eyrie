@@ -98,3 +98,14 @@ func TestMonitorValidateHTTPClientKeyPasswordRequiresKey(t *testing.T) {
 		t.Fatalf("expected client key password validation error, got %v", err)
 	}
 }
+
+func TestMonitorEffectiveAlertNamesDedupesAndSkipsBlankValues(t *testing.T) {
+	monitor := Monitor{
+		AlertNames: []string{"team-auth", " ", "team-auth", "team-ops"},
+	}
+
+	got := monitor.EffectiveAlertNames()
+	if len(got) != 2 || got[0] != "team-auth" || got[1] != "team-ops" {
+		t.Fatalf("unexpected effective alert names %#v", got)
+	}
+}

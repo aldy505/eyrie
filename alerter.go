@@ -12,3 +12,8 @@ var ErrAlerterDropped = errors.New("alerter message dropped")
 type Alerter interface {
 	Send(ctx context.Context, alert AlertMessage) error
 }
+
+type NamedAlerter struct {
+	Name    string
+	Alerter Alerter
+}
