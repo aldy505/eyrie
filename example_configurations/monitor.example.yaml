@@ -12,6 +12,8 @@ monitors:
     description: "This is an example monitor checking example.com"
     interval: "1m"
     type: "http"
+    alert_names:
+      - "team-platform"
     http:
       method: "GET"
       skip_tls_verify: false
@@ -79,6 +81,8 @@ monitors:
     type: "postgres"
     checker_names:
       - "us-east-1-public-checker"
+    alert_names:
+      - "team-auth"
     postgres:
       dsn: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       timeout_seconds: 10
