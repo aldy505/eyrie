@@ -20,15 +20,16 @@ type AlertMessage struct {
 	Reason          string    `json:"reason"`
 	OccurredAt      time.Time `json:"occurred_at"`
 	AffectedRegions []string  `json:"affected_regions"`
+	AlertNames      []string  `json:"alert_names,omitempty"`
 }
 
 type AlerterWorker struct {
 	subscriber *pubsub.Subscription
-	alerters   []Alerter
+	alerters   []NamedAlerter
 	shutdown   chan struct{}
 }
 
-func NewAlerterWorker(subscriber *pubsub.Subscription, alerters []Alerter) *AlerterWorker {
+func NewAlerterWorker(subscriber *pubsub.Subscription, alerters []NamedAlerter) *AlerterWorker {
 	return &AlerterWorker{
 		subscriber: subscriber,
 		alerters:   alerters,
@@ -62,11 +63,13 @@ func (w *AlerterWorker) Start() error {
 				continue
 			}
 
-			if len(w.alerters) == 0 {
+			targetAlerters := selectNamedAlerters(w.alerters, alert.AlertNames)
+			if len(targetAlerters) == 0 {
 				slog.Info("alert received without configured delivery targets",
 					slog.String("monitor_id", alert.MonitorID),
 					slog.String("status", alert.Status),
-					slog.String("scope", alert.Scope))
+					slog.String("scope", alert.Scope),
+					slog.Int("requested_alert_name_count", len(alert.AlertNames)))
 				sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.alert.deliveries.skipped", 1, sentry.WithAttributes(attribute.String("status", alert.Status), attribute.String("scope", alert.Scope)))
 				message.Ack()
 				cancel()
@@ -78,8 +81,8 @@ func (w *AlerterWorker) Start() error {
 			sendCtx = span.Context()
 			var sendErr error
 			deliveredCount := 0
-			for _, alerter := range w.alerters {
-				if err := alerter.Send(sendCtx, alert); err != nil {
+			for _, alerter := range targetAlerters {
+				if err := alerter.Alerter.Send(sendCtx, alert); err != nil {
 					sendErr = errors.Join(sendErr, err)
 					continue
 				}
@@ -91,7 +94,7 @@ func (w *AlerterWorker) Start() error {
 				slog.Error("sending alert",
 					slog.String("error", sendErr.Error()),
 					slog.Int("delivered_count", deliveredCount),
-					slog.Int("alerter_count", len(w.alerters)))
+					slog.Int("alerter_count", len(targetAlerters)))
 				if deliveredCount == 0 && message.Nackable() {
 					message.Nack()
 				} else {
@@ -115,4 +118,30 @@ func (w *AlerterWorker) Start() error {
 func (w *AlerterWorker) Stop() error {
 	close(w.shutdown)
 	return nil
+}
+
+func selectNamedAlerters(alerters []NamedAlerter, alertNames []string) []NamedAlerter {
+	if len(alertNames) == 0 {
+		return alerters
+	}
+
+	requestedAlertNames := make(map[string]struct{}, len(alertNames))
+	for _, alertName := range alertNames {
+		if alertName == "" {
+			continue
+		}
+		requestedAlertNames[alertName] = struct{}{}
+	}
+	if len(requestedAlertNames) == 0 {
+		return nil
+	}
+
+	filteredAlerters := make([]NamedAlerter, 0, len(requestedAlertNames))
+	for _, alerter := range alerters {
+		if _, exists := requestedAlertNames[alerter.Name]; exists {
+			filteredAlerters = append(filteredAlerters, alerter)
+		}
+	}
+
+	return filteredAlerters
 }

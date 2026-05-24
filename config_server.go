@@ -17,6 +17,7 @@ type DatasetConfig struct {
 }
 
 type WebhookAlertingConfig struct {
+	Name          string            `yaml:"name"`
 	Enabled       bool              `yaml:"enabled"`
 	URL           string            `yaml:"url"`
 	HmacSecret    string            `yaml:"hmac_secret"`
@@ -24,21 +25,25 @@ type WebhookAlertingConfig struct {
 }
 
 type SlackAlertingConfig struct {
+	Name       string `yaml:"name"`
 	Enabled    bool   `yaml:"enabled"`
 	WebhookURL string `yaml:"webhook_url"`
 }
 
 type DiscordAlertingConfig struct {
+	Name       string `yaml:"name"`
 	Enabled    bool   `yaml:"enabled"`
 	WebhookURL string `yaml:"webhook_url"`
 }
 
 type TeamsAlertingConfig struct {
+	Name       string `yaml:"name"`
 	Enabled    bool   `yaml:"enabled"`
 	WebhookURL string `yaml:"webhook_url"`
 }
 
 type NtfyAlertingConfig struct {
+	Name        string `yaml:"name"`
 	Enabled     bool   `yaml:"enabled"`
 	TopicURL    string `yaml:"topic_url"`
 	AccessToken string `yaml:"access_token"`
@@ -104,11 +109,11 @@ type ServerConfig struct {
 	} `yaml:"task_queue"`
 	Dataset  DatasetConfig `yaml:"dataset"`
 	Alerting struct {
-		Webhook WebhookAlertingConfig `yaml:"webhook"`
-		Slack   SlackAlertingConfig   `yaml:"slack"`
-		Discord DiscordAlertingConfig `yaml:"discord"`
-		Teams   TeamsAlertingConfig   `yaml:"teams"`
-		Ntfy    NtfyAlertingConfig    `yaml:"ntfy"`
+		Webhook []WebhookAlertingConfig `yaml:"webhook"`
+		Slack   []SlackAlertingConfig   `yaml:"slack"`
+		Discord []DiscordAlertingConfig `yaml:"discord"`
+		Teams   []TeamsAlertingConfig   `yaml:"teams"`
+		Ntfy    []NtfyAlertingConfig    `yaml:"ntfy"`
 	} `yaml:"alerting"`
 	Sentry struct {
 		Dsn                   string  `yaml:"dsn"`
@@ -154,6 +159,48 @@ func (c ServerConfig) Validate() error {
 		return fmt.Errorf("cache.backend must be either memory or redis")
 	}
 
+	seenAlertNames := make(map[string]string)
+	for idx, alert := range c.Alerting.Webhook {
+		if err := validateAlertName(seenAlertNames, "alerting.webhook", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Slack {
+		if err := validateAlertName(seenAlertNames, "alerting.slack", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Discord {
+		if err := validateAlertName(seenAlertNames, "alerting.discord", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Teams {
+		if err := validateAlertName(seenAlertNames, "alerting.teams", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Ntfy {
+		if err := validateAlertName(seenAlertNames, "alerting.ntfy", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateAlertName(seen map[string]string, path string, idx int, name string) error {
+	trimmedName := strings.TrimSpace(name)
+	if trimmedName == "" {
+		return fmt.Errorf("%s[%d].name is required", path, idx)
+	}
+
+	location := fmt.Sprintf("%s[%d]", path, idx)
+	if previous, exists := seen[trimmedName]; exists {
+		return fmt.Errorf("%s: duplicate alert name %q already defined at %s", location, trimmedName, previous)
+	}
+
+	seen[trimmedName] = location
 	return nil
 }
 
