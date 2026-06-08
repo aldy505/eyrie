@@ -393,17 +393,30 @@ type UptimeDataHistorical struct {
 	DailyDowntimes map[int]struct {
 		DurationMinutes int `json:"duration_minutes"`
 	}
+	TLS *UptimeDataTLSInfo
+}
+
+type UptimeDataTLSInfo struct {
+	Version     string `json:"version,omitempty"`
+	Cipher      string `json:"cipher,omitempty"`
+	NotAfter    string `json:"not_after,omitempty"`
+	Issuer      string `json:"issuer,omitempty"`
+	Subject     string `json:"subject,omitempty"`
+	DN          string `json:"dn,omitempty"`
+	IsExpired   bool   `json:"is_expired"`
+	IsHttps     bool   `json:"is_https"`
 }
 
 type UptimeDataHandlerSingleMonitor struct {
-	ID             string      `json:"id"`
-	Name           string      `json:"name"`
-	Description    null.String `json:"description,omitempty"`
-	ResponseTimeMs int64       `json:"response_time_ms"`
-	Age            int         `json:"age"`
+	ID             string                  `json:"id"`
+	Name           string                  `json:"name"`
+	Description    null.String             `json:"description,omitempty"`
+	ResponseTimeMs int64                   `json:"response_time_ms"`
+	Age            int                     `json:"age"`
 	Downtimes      map[int]struct {
 		DurationMinutes int `json:"duration_minutes"`
 	} `json:"downtimes"`
+	TLS             *UptimeDataTLSInfo `json:"tls,omitempty"`
 }
 
 type UptimeDataHandlerMonitorType string
@@ -549,6 +562,7 @@ func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandler
 						ResponseTimeMs: historical.LatencyMs,
 						Age:            historical.MonitorAge,
 						Downtimes:      historical.DailyDowntimes,
+						TLS:            historical.TLS,
 					})
 				}
 			}
@@ -581,6 +595,7 @@ func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandler
 					ResponseTimeMs: historical.LatencyMs,
 					Age:            historical.MonitorAge,
 					Downtimes:      historical.DailyDowntimes,
+					TLS:            historical.TLS,
 				})
 			}
 		}
@@ -993,7 +1008,94 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 	// Calculate overall average latency
 	uptimeHistorical.LatencyMs = uptimeHistorical.LatencyMs / int64(len(dailyBucket))
 
+	// Fetch TLS info from the latest row
+	tlsInfo, tlsErr := s.fetchLatestTLSInfo(ctx, monitorId)
+	if tlsErr == nil && tlsInfo != nil {
+		uptimeHistorical.TLS = tlsInfo
+	}
+
 	return uptimeHistorical, nil
+}
+
+func (s *Server) fetchLatestTLSInfo(ctx context.Context, monitorId string) (*UptimeDataTLSInfo, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	var tlsVersion, tlsCipher, tlsCertIssuer, tlsCertSubject, tlsCertDN, tlsCertFingerprint null.String
+	var tlsExpiry, tlsCertNotBefore null.Time
+	var tlsCertIsExpired bool
+
+	err = conn.QueryRowContext(ctx, `
+		SELECT
+			tls_version,
+			tls_cipher,
+			tls_expiry,
+			tls_cert_not_before,
+			tls_cert_issuer,
+			tls_cert_subject,
+			tls_cert_dn,
+			tls_cert_fingerprint,
+			tls_cert_is_expired
+		FROM
+			monitor_historical
+		WHERE
+			monitor_id = ?
+		ORDER BY
+			created_at DESC
+		LIMIT 1`,
+		monitorId,
+	).Scan(
+		&tlsVersion,
+		&tlsCipher,
+		&tlsExpiry,
+		&tlsCertNotBefore,
+		&tlsCertIssuer,
+		&tlsCertSubject,
+		&tlsCertDN,
+		&tlsCertFingerprint,
+		&tlsCertIsExpired,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("querying latest TLS info: %w", err)
+	}
+
+	// Determine if this monitor uses HTTPS based on TLS version being present
+	isHttps := !tlsVersion.IsZero()
+
+	// If we have TLS data, build the info struct
+	if isHttps || !tlsCertIssuer.IsZero() || !tlsCertSubject.IsZero() {
+		tlsInfo := &UptimeDataTLSInfo{
+			IsHttps: isHttps,
+		}
+		if !tlsVersion.IsZero() {
+			tlsInfo.Version = tlsVersion.String
+		}
+		if !tlsCipher.IsZero() {
+			tlsInfo.Cipher = tlsCipher.String
+		}
+		if !tlsExpiry.IsZero() {
+			tlsInfo.NotAfter = tlsExpiry.Time.UTC().Format(time.RFC3339)
+		}
+		if !tlsCertIssuer.IsZero() {
+			tlsInfo.Issuer = tlsCertIssuer.String
+		}
+		if !tlsCertSubject.IsZero() {
+			tlsInfo.Subject = tlsCertSubject.String
+		}
+		if !tlsCertDN.IsZero() {
+			tlsInfo.DN = tlsCertDN.String
+		}
+		tlsInfo.IsExpired = tlsCertIsExpired
+		return tlsInfo, nil
+	}
+
+	return nil, nil
 }
 
 // fetchFromAggregateMonitorHistorical fetches monitor historical data from the aggregate table
@@ -1170,6 +1272,18 @@ func (s *Server) CheckerRegistration(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s.monitorConfig.ForChecker(checkerName))
 }
 
+type TLSCertificateInfo struct {
+	Version     null.String `json:"version,omitempty"`
+	Cipher      null.String `json:"cipher,omitempty"`
+	NotBefore   null.Time   `json:"not_before,omitempty"`
+	NotAfter    null.Time   `json:"not_after,omitempty"`
+	Issuer      null.String `json:"issuer,omitempty"`
+	Subject     null.String `json:"subject,omitempty"`
+	DN          null.String `json:"dn,omitempty"`
+	Fingerprint null.String `json:"fingerprint,omitempty"`
+	IsExpired   bool        `json:"is_expired"`
+}
+
 type CheckerSubmissionRequest struct {
 	MonitorID       string              `json:"monitor_id"`
 	ProbeType       string              `json:"probe_type,omitempty"`
@@ -1182,6 +1296,7 @@ type CheckerSubmissionRequest struct {
 	TlsVersion      null.String         `json:"tls_version,omitempty"`
 	TlsCipher       null.String         `json:"tls_cipher,omitempty"`
 	TlsExpiry       null.Time           `json:"tls_expiry,omitempty"`
+	TlsCertInfo     TLSCertificateInfo  `json:"tls_cert_info,omitempty"`
 	Timestamp       time.Time           `json:"timestamp"`
 	Timings         CheckerTraceTimings `json:"timings,omitempty"`
 }

@@ -18,6 +18,12 @@ type MonitorHistorical struct {
 	TlsVersion                null.String `db:"tls_version"`
 	TlsCipher                 null.String `db:"tls_cipher"`
 	TlsExpiry                 null.Time   `db:"tls_expiry"`
+	TlsCertNotBefore          null.Time   `db:"tls_cert_not_before"`
+	TlsCertIssuer             null.String `db:"tls_cert_issuer"`
+	TlsCertSubject            null.String `db:"tls_cert_subject"`
+	TlsCertDN                 null.String `db:"tls_cert_dn"`
+	TlsCertFingerprint        null.String `db:"tls_cert_fingerprint"`
+	TlsCertIsExpired          bool        `db:"tls_cert_is_expired"`
 	TimingConnAcquiredMs      null.Int    `db:"timing_conn_acquired_ms"`
 	TimingFirstResponseByteMs null.Int    `db:"timing_first_response_byte_ms"`
 	TimingDNSLookupStartMs    null.Int    `db:"timing_dns_lookup_start_ms"`
