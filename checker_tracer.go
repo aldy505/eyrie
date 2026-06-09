@@ -2,10 +2,22 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net/http/httptrace"
 	"sync"
 	"time"
 )
+
+type TLSCertInfo struct {
+	Version     string
+	Cipher      string
+	NotBefore   time.Time
+	NotAfter    time.Time
+	Issuer      string
+	Subject     string
+	DN          string
+	Fingerprint string
+}
 
 type CheckerTracer struct {
 	sync.Mutex
@@ -16,6 +28,8 @@ type CheckerTracer struct {
 	dnsDoneTime           time.Time
 	tlsHandshakeStartTime time.Time
 	tlsHandshakeDoneTime  time.Time
+	tlsConnState          *tls.ConnectionState
+	tlsConnError          error
 }
 
 type CheckerTraceTimings struct {
@@ -63,9 +77,14 @@ func (ct *CheckerTracer) GetClientTrace() *httptrace.ClientTrace {
 			ct.tlsHandshakeStartTime = time.Now()
 			ct.Unlock()
 		},
-		TLSHandshakeDone: func(tls.ConnectionState, error) {
+		TLSHandshakeDone: func(connState tls.ConnectionState, err error) {
 			ct.Lock()
 			ct.tlsHandshakeDoneTime = time.Now()
+			if ct.tlsConnState == nil {
+				stateCopy := connState
+				ct.tlsConnState = &stateCopy
+			}
+			ct.tlsConnError = err
 			ct.Unlock()
 		},
 	}
@@ -101,4 +120,39 @@ func (ct *CheckerTracer) GetTimings() CheckerTraceTimings {
 		timings.TLSHandshakeDoneMs = ct.tlsHandshakeDoneTime.Sub(ct.tlsHandshakeStartTime).Milliseconds()
 	}
 	return timings
+}
+
+func (ct *CheckerTracer) GetTLSConnectionState() *tls.ConnectionState {
+	ct.Lock()
+	defer ct.Unlock()
+	return ct.tlsConnState
+}
+
+func (ct *CheckerTracer) GetTLSError() error {
+	ct.Lock()
+	defer ct.Unlock()
+	return ct.tlsConnError
+}
+
+func ExtractTLSCertInfo(state *tls.ConnectionState) TLSCertInfo {
+	if state == nil || len(state.PeerCertificates) == 0 {
+		return TLSCertInfo{}
+	}
+
+	cert := state.PeerCertificates[0]
+	info := TLSCertInfo{
+		Version:   tls.VersionName(state.Version),
+		Cipher:    tls.CipherSuiteName(state.CipherSuite),
+		NotBefore: cert.NotBefore,
+		NotAfter:  cert.NotAfter,
+		Issuer:    cert.Issuer.String(),
+		Subject:   cert.Subject.String(),
+		DN:        cert.Subject.CommonName,
+	}
+
+	if len(state.PeerCertificates) > 0 && len(state.PeerCertificates[0].RawSubject) > 0 {
+		info.Fingerprint = fmt.Sprintf("%x", state.PeerCertificates[0].RawSubject)
+	}
+
+	return info
 }

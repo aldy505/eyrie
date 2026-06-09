@@ -72,6 +72,38 @@ func (c *Checker) probeHTTP(ctx context.Context, monitor Monitor) CheckerSubmiss
 	response, err := httpClient.Do(request)
 	submission.LatencyMs = time.Since(requestStart).Milliseconds()
 	submission.Timings = checkerTracer.GetTimings()
+
+	if response != nil && response.TLS != nil {
+		submission.TlsVersion = null.StringFrom(tls.VersionName(response.TLS.Version))
+		submission.TlsCipher = null.StringFrom(tls.CipherSuiteName(response.TLS.CipherSuite))
+		if len(response.TLS.PeerCertificates) > 0 && response.TLS.PeerCertificates[0] != nil {
+			submission.TlsExpiry = null.TimeFrom(response.TLS.PeerCertificates[0].NotAfter)
+			submission.TlsCertInfo = buildTLSCertInfoFromConnectionState(response.TLS)
+		}
+	} else {
+		if tlsState := checkerTracer.GetTLSConnectionState(); tlsState != nil {
+			submission.TlsVersion = null.StringFrom(tls.VersionName(tlsState.Version))
+			submission.TlsCipher = null.StringFrom(tls.CipherSuiteName(tlsState.CipherSuite))
+			if len(tlsState.PeerCertificates) > 0 && tlsState.PeerCertificates[0] != nil {
+				submission.TlsExpiry = null.TimeFrom(tlsState.PeerCertificates[0].NotAfter)
+				submission.TlsCertInfo = buildTLSCertInfoFromConnectionState(tlsState)
+			}
+		} else if tlsErr := checkerTracer.GetTLSError(); tlsErr != nil {
+			if certInfo := buildTLSCertInfoFromError(tlsErr); certInfo.IsExpired || !certInfo.NotBefore.IsZero() {
+				if submission.TlsExpiry.IsZero() && certInfo.NotAfter.Valid {
+					submission.TlsExpiry = null.TimeFrom(certInfo.NotAfter.Time)
+				}
+				if submission.TlsVersion.IsZero() && certInfo.Version.Valid {
+					submission.TlsVersion = null.StringFrom(certInfo.Version.String)
+				}
+				if submission.TlsCipher.IsZero() && certInfo.Cipher.Valid {
+					submission.TlsCipher = null.StringFrom(certInfo.Cipher.String)
+				}
+				submission.TlsCertInfo = certInfo
+			}
+		}
+	}
+
 	if err != nil {
 		submission.FailureReason = null.StringFrom(err.Error())
 		return submission
@@ -89,14 +121,6 @@ func (c *Checker) probeHTTP(ctx context.Context, monitor Monitor) CheckerSubmiss
 		bodyBytes, err := io.ReadAll(response.Body)
 		if err == nil {
 			submission.ResponseBody = null.StringFrom(string(bodyBytes))
-		}
-	}
-
-	if response.TLS != nil {
-		submission.TlsVersion = null.StringFrom(tls.VersionName(response.TLS.Version))
-		submission.TlsCipher = null.StringFrom(tls.CipherSuiteName(response.TLS.CipherSuite))
-		if len(response.TLS.PeerCertificates) > 0 && response.TLS.PeerCertificates[0] != nil {
-			submission.TlsExpiry = null.TimeFrom(response.TLS.PeerCertificates[0].NotAfter)
 		}
 	}
 
@@ -234,4 +258,65 @@ func pemContainsEncryptedBlock(pemBytes []byte) bool {
 		remaining = rest
 	}
 	return false
+}
+
+func buildTLSCertInfoFromConnectionState(tlsState *tls.ConnectionState) TLSCertificateInfo {
+	if tlsState == nil || len(tlsState.PeerCertificates) == 0 {
+		return TLSCertificateInfo{}
+	}
+
+	cert := tlsState.PeerCertificates[0]
+	fingerprint := ""
+	if len(cert.RawSubject) > 0 {
+		fingerprint = fmt.Sprintf("%x", cert.RawSubject)
+	}
+
+	notAfter := cert.NotAfter.UTC()
+	isExpired := time.Now().UTC().After(notAfter)
+
+	return TLSCertificateInfo{
+		Version:     null.StringFrom(tls.VersionName(tlsState.Version)),
+		Cipher:      null.StringFrom(tls.CipherSuiteName(tlsState.CipherSuite)),
+		NotBefore:   null.TimeFrom(cert.NotBefore.UTC()),
+		NotAfter:    null.TimeFrom(notAfter),
+		Issuer:      null.StringFrom(cert.Issuer.String()),
+		Subject:     null.StringFrom(cert.Subject.String()),
+		DN:          null.StringFrom(cert.Subject.CommonName),
+		Fingerprint: null.StringFrom(fingerprint),
+		IsExpired:   isExpired,
+	}
+}
+
+func buildTLSCertInfoFromError(err error) TLSCertificateInfo {
+	if err == nil {
+		return TLSCertificateInfo{}
+	}
+
+	errStr := err.Error()
+	pemBlock, _ := pem.Decode([]byte(errStr))
+	if pemBlock == nil {
+		return TLSCertificateInfo{}
+	}
+
+	cert, parseErr := x509.ParseCertificate(pemBlock.Bytes)
+	if parseErr != nil {
+		return TLSCertificateInfo{}
+	}
+
+	notAfter := cert.NotAfter.UTC()
+	isExpired := time.Now().UTC().After(notAfter)
+	fingerprint := ""
+	if len(cert.RawSubject) > 0 {
+		fingerprint = fmt.Sprintf("%x", cert.RawSubject)
+	}
+
+	return TLSCertificateInfo{
+		NotBefore:   null.TimeFrom(cert.NotBefore.UTC()),
+		NotAfter:    null.TimeFrom(notAfter),
+		Issuer:      null.StringFrom(cert.Issuer.String()),
+		Subject:     null.StringFrom(cert.Subject.String()),
+		DN:          null.StringFrom(cert.Subject.CommonName),
+		Fingerprint: null.StringFrom(fingerprint),
+		IsExpired:   isExpired,
+	}
 }
