@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,32 +91,6 @@ func (a JSONWebhookAlerter) Send(ctx context.Context, alert AlertMessage) error 
 	return doAlertRequest(request)
 }
 
-type NtfyAlerter struct {
-	topicURL    string
-	accessToken string
-	username    string
-	password    string
-}
-
-func (a NtfyAlerter) Send(ctx context.Context, alert AlertMessage) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, a.topicURL, strings.NewReader(formatAlertMessage(alert)))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("User-Agent", "eyrie-ntfy/1.0")
-	presentation := buildAlertPresentation(alert)
-	request.Header.Set("Title", buildNtfyTitle(alert))
-	request.Header.Set("Priority", presentation.Priority)
-	request.Header.Set("Tags", strings.Join(presentation.Tags, ","))
-	if a.accessToken != "" {
-		request.Header.Set("Authorization", "Bearer "+a.accessToken)
-	}
-	if a.username != "" || a.password != "" {
-		request.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(a.username+":"+a.password)))
-	}
-	return doAlertRequest(request)
-}
-
 func BuildAlerters(config ServerConfig) []NamedAlerter {
 	alerters := []NamedAlerter{}
 	for _, alert := range config.Alerting.Webhook {
@@ -179,14 +152,20 @@ func BuildAlerters(config ServerConfig) []NamedAlerter {
 		if !alert.Enabled || alert.TopicURL == "" {
 			continue
 		}
+		wrapped := NtfyAlerter{
+			topicURL:    alert.TopicURL,
+			accessToken: alert.AccessToken,
+			username:    alert.Username,
+			password:    alert.Password,
+		}
+		suppressWindow := alert.SuppressWindowMinutes
+		if suppressWindow <= 0 {
+			suppressWindow = 15
+		}
+		digestInterval := alert.DigestIntervalMinutes
 		alerters = append(alerters, NamedAlerter{
-			Name: strings.TrimSpace(alert.Name),
-			Alerter: NtfyAlerter{
-				topicURL:    alert.TopicURL,
-				accessToken: alert.AccessToken,
-				username:    alert.Username,
-				password:    alert.Password,
-			},
+			Name:    strings.TrimSpace(alert.Name),
+			Alerter: NewBufferedNtfyAlerter(wrapped, suppressWindow, digestInterval),
 		})
 	}
 	return alerters
@@ -223,14 +202,6 @@ func buildAlertPresentation(alert AlertMessage) AlertPresentation {
 	}
 
 	return presentation
-}
-
-func buildNtfyTitle(alert AlertMessage) string {
-	if alert.Name == "" {
-		return strings.TrimSpace(buildAlertPresentation(alert).Title)
-	}
-
-	return alert.Name
 }
 
 func formatProviderAlertMessage(alert AlertMessage) string {
