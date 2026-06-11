@@ -497,7 +497,7 @@ func newIngesterModeRunner(ctx context.Context, configPath string, monitorPath s
 	}
 
 	return &ingesterModeRunner{
-		worker:   NewIngesterWorker(database.db, queues.ingesterSubscriber, runtimeConfig.MonitorConfig),
+		worker:   NewIngesterWorker(database.db, queues.ingesterSubscriber, runtimeConfig.MonitorConfig, runtimeConfig.Dataset),
 		queues:   queues,
 		database: database,
 	}, nil
