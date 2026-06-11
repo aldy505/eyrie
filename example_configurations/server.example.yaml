@@ -74,10 +74,14 @@ alerting:
       enabled: false
       topic_url: "https://ntfy.sh/eyrie-alerts-auth"
       access_token: "ntfy-access-token"
+      suppress_window_minutes: 15
+      digest_interval_minutes: 60
     - name: "team-platform"
       enabled: false
       topic_url: "https://ntfy.sh/eyrie-alerts-platform"
       access_token: "ntfy-access-token"
+      suppress_window_minutes: 15
+      digest_interval_minutes: 0
 
 sentry:
   dsn: ""

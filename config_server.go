@@ -43,12 +43,14 @@ type TeamsAlertingConfig struct {
 }
 
 type NtfyAlertingConfig struct {
-	Name        string `yaml:"name"`
-	Enabled     bool   `yaml:"enabled"`
-	TopicURL    string `yaml:"topic_url"`
-	AccessToken string `yaml:"access_token"`
-	Username    string `yaml:"username"`
-	Password    string `yaml:"password"`
+	Name                  string `yaml:"name"`
+	Enabled               bool   `yaml:"enabled"`
+	TopicURL              string `yaml:"topic_url"`
+	AccessToken           string `yaml:"access_token"`
+	Username              string `yaml:"username"`
+	Password              string `yaml:"password"`
+	SuppressWindowMinutes int    `yaml:"suppress_window_minutes" default:"15"`
+	DigestIntervalMinutes int    `yaml:"digest_interval_minutes" default:"60"`
 }
 
 type RegisteredChecker struct {
