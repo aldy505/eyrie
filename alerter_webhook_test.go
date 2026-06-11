@@ -176,3 +176,25 @@ func TestWebhookAlerterSendAddsParityHeaders(t *testing.T) {
 		t.Fatalf("unexpected webhook body %+v", decoded)
 	}
 }
+
+func TestBuildAlertersBuildsNamedEnabledDestinations(t *testing.T) {
+	config := ServerConfig{}
+	config.Alerting.Teams = []TeamsAlertingConfig{
+		{Name: "team-ops", Enabled: true, WebhookURL: "https://example.com/teams"},
+	}
+	config.Alerting.Ntfy = []NtfyAlertingConfig{
+		{Name: "team-auth", Enabled: true, TopicURL: "https://ntfy.sh/auth"},
+		{Name: "team-billing", Enabled: false, TopicURL: "https://ntfy.sh/billing"},
+	}
+
+	alerters := BuildAlerters(config)
+	if len(alerters) != 2 {
+		t.Fatalf("expected 2 alerters, got %d", len(alerters))
+	}
+
+	gotNames := []string{alerters[0].Name, alerters[1].Name}
+	expectedNames := []string{"team-ops", "team-auth"}
+	if strings.Join(gotNames, ",") != strings.Join(expectedNames, ",") {
+		t.Fatalf("unexpected alerter names %v", gotNames)
+	}
+}

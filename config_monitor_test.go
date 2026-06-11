@@ -66,3 +66,46 @@ func TestMonitorConfigForChecker(t *testing.T) {
 		t.Fatalf("unexpected filtered group monitor ids: %#v", got)
 	}
 }
+
+func TestMonitorValidateHTTPClientCertificateRequiresKeyPair(t *testing.T) {
+	monitor := Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			URL:            "https://example.com",
+			ClientCertPath: "/tmp/client.crt",
+		},
+	}
+
+	err := monitor.Validate()
+	if err == nil || err.Error() != "monitor http-monitor: http.client_cert_path and http.client_key_path must be set together" {
+		t.Fatalf("expected client cert/key pair validation error, got %v", err)
+	}
+}
+
+func TestMonitorValidateHTTPClientKeyPasswordRequiresKey(t *testing.T) {
+	monitor := Monitor{
+		ID:   "http-monitor",
+		Type: MonitorTypeHTTP,
+		HTTP: &MonitorHTTPConfig{
+			URL:               "https://example.com",
+			ClientKeyPassword: "secret",
+		},
+	}
+
+	err := monitor.Validate()
+	if err == nil || err.Error() != "monitor http-monitor: http.client_key_password requires http.client_key_path" {
+		t.Fatalf("expected client key password validation error, got %v", err)
+	}
+}
+
+func TestMonitorEffectiveAlertNamesDedupesAndSkipsBlankValues(t *testing.T) {
+	monitor := Monitor{
+		AlertNames: []string{"team-auth", " ", "team-auth", "team-ops"},
+	}
+
+	got := monitor.EffectiveAlertNames()
+	if len(got) != 2 || got[0] != "team-auth" || got[1] != "team-ops" {
+		t.Fatalf("unexpected effective alert names %#v", got)
+	}
+}

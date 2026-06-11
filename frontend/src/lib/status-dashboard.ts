@@ -1,5 +1,16 @@
 import { z } from "zod";
 
+const tlsInfoSchema = z.object({
+  version: z.string().optional(),
+  cipher: z.string().optional(),
+  not_after: z.string().optional(),
+  issuer: z.string().optional(),
+  subject: z.string().optional(),
+  dn: z.string().optional(),
+  is_expired: z.boolean(),
+  is_https: z.boolean(),
+});
+
 const singleMonitorSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -12,6 +23,7 @@ const singleMonitorSchema = z.object({
       duration_minutes: z.number(),
     }),
   ),
+  tls: tlsInfoSchema.nullable().optional(),
 });
 
 export const uptimeDataSchema = z.object({
@@ -79,6 +91,7 @@ export type Metadata = z.infer<typeof metadataSchema>;
 export type IncidentsData = z.infer<typeof incidentsSchema>;
 export type RegionData = z.infer<typeof regionSchema>;
 export type SingleMonitor = z.infer<typeof singleMonitorSchema>;
+export type TLSInfo = z.infer<typeof tlsInfoSchema>;
 export type UptimeData = {
   last_updated: RawUptimeData["last_updated"];
   monitors: Array<{

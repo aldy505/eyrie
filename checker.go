@@ -99,20 +99,20 @@ REGISTER_UPSTREAM:
 				ctx = span.Context()
 				span.SetData("eyrie.monitor_count", len(c.monitors.Monitors))
 				span.SetData("eyrie.region", c.config.Region)
-				sentry.NewMeter(context.Background()).WithCtx(ctx).Gauge("eyrie.checker.monitors.configured", float64(len(c.monitors.Monitors)), sentry.WithAttributes(attribute.String("region", c.config.Region)))
+				sentry.NewMeter(ctx).WithCtx(ctx).Gauge("eyrie.checker.monitors.configured", float64(len(c.monitors.Monitors)), sentry.WithAttributes(attribute.String("region", c.config.Region)))
 				slog.InfoContext(ctx, "performing checks for monitors", slog.Int("monitor_count", len(c.monitors.Monitors)))
 				s := semaphore.NewWeighted(10) // Limit to 10 concurrent checks
 				wg := sync.WaitGroup{}
 				for _, monitor := range c.monitors.Monitors {
 					wg.Go(func() {
-						if err := s.Acquire(checkerCtx, 1); err != nil {
+						if err := s.Acquire(ctx, 1); err != nil {
 							slog.ErrorContext(ctx, "acquiring semaphore for monitor check", slog.String("error", err.Error()))
 							return
 						}
 						defer s.Release(1)
 
 						checkerStart := time.Now()
-						err := c.performMonitorCheck(checkerCtx, monitor)
+						err := c.performMonitorCheck(ctx, monitor)
 						if err != nil {
 							slog.ErrorContext(ctx, "performing monitor check", slog.String("monitor_id", monitor.ID), slog.String("error", err.Error()))
 						}
@@ -122,7 +122,7 @@ REGISTER_UPSTREAM:
 				}
 
 				wg.Wait()
-				sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.checker.cycle.duration", float64(time.Since(checkCycleStart).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("region", c.config.Region)))
+				sentry.NewMeter(ctx).WithCtx(ctx).Distribution("eyrie.checker.cycle.duration", float64(time.Since(checkCycleStart).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("region", c.config.Region)))
 				span.Finish()
 				checkerCancel()
 			}

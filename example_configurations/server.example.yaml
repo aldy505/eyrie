@@ -51,24 +51,37 @@ dataset:
 
 alerting:
   webhook:
-    enabled: false
-    url: "https://example.com/webhook"
-    hmac_secret: "your-hmac-secret-here"
-    custom_headers:
-      X-Environment: "production"
+    - name: "default-webhook"
+      enabled: false
+      url: "https://example.com/webhook"
+      hmac_secret: "your-hmac-secret-here"
+      custom_headers:
+        X-Environment: "production"
   slack:
-    enabled: false
-    webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+    - name: "team-ops-slack"
+      enabled: false
+      webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
   discord:
-    enabled: false
-    webhook_url: "https://discord.com/api/webhooks/XXX/YYY"
+    - name: "team-platform-discord"
+      enabled: false
+      webhook_url: "https://discord.com/api/webhooks/XXX/YYY"
   teams:
-    enabled: false
-    webhook_url: "https://example.webhook.office.com/webhookb2/..."
+    - name: "team-ops-teams"
+      enabled: false
+      webhook_url: "https://example.webhook.office.com/webhookb2/..."
   ntfy:
-    enabled: false
-    topic_url: "https://ntfy.sh/eyrie-alerts"
-    access_token: "ntfy-access-token"
+    - name: "team-auth"
+      enabled: false
+      topic_url: "https://ntfy.sh/eyrie-alerts-auth"
+      access_token: "ntfy-access-token"
+      suppress_window_minutes: 15
+      digest_interval_minutes: 60
+    - name: "team-platform"
+      enabled: false
+      topic_url: "https://ntfy.sh/eyrie-alerts-platform"
+      access_token: "ntfy-access-token"
+      suppress_window_minutes: 15
+      digest_interval_minutes: 0
 
 sentry:
   dsn: ""

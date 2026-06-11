@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,67 +91,81 @@ func (a JSONWebhookAlerter) Send(ctx context.Context, alert AlertMessage) error 
 	return doAlertRequest(request)
 }
 
-type NtfyAlerter struct {
-	topicURL    string
-	accessToken string
-	username    string
-	password    string
-}
-
-func (a NtfyAlerter) Send(ctx context.Context, alert AlertMessage) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, a.topicURL, strings.NewReader(formatAlertMessage(alert)))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("User-Agent", "eyrie-ntfy/1.0")
-	presentation := buildAlertPresentation(alert)
-	request.Header.Set("Title", buildNtfyTitle(alert))
-	request.Header.Set("Priority", presentation.Priority)
-	request.Header.Set("Tags", strings.Join(presentation.Tags, ","))
-	if a.accessToken != "" {
-		request.Header.Set("Authorization", "Bearer "+a.accessToken)
-	}
-	if a.username != "" || a.password != "" {
-		request.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(a.username+":"+a.password)))
-	}
-	return doAlertRequest(request)
-}
-
-func BuildAlerters(config ServerConfig) []Alerter {
-	alerters := []Alerter{}
-	if config.Alerting.Webhook.Enabled && config.Alerting.Webhook.URL != "" {
-		alerters = append(alerters, NewWebhookAlerter(config.Alerting.Webhook.URL, config.Alerting.Webhook.HmacSecret, config.Alerting.Webhook.CustomHeaders))
-	}
-	if config.Alerting.Slack.Enabled && config.Alerting.Slack.WebhookURL != "" {
-		alerters = append(alerters, JSONWebhookAlerter{
-			url:         config.Alerting.Slack.WebhookURL,
-			userAgent:   "eyrie-slack/1.0",
-			contentType: "application/json",
-			buildBody:   buildSlackBody,
+func BuildAlerters(config ServerConfig) []NamedAlerter {
+	alerters := []NamedAlerter{}
+	for _, alert := range config.Alerting.Webhook {
+		if !alert.Enabled || alert.URL == "" {
+			continue
+		}
+		alerters = append(alerters, NamedAlerter{
+			Name: strings.TrimSpace(alert.Name),
+			Alerter: NewWebhookAlerter(
+				alert.URL,
+				alert.HmacSecret,
+				alert.CustomHeaders,
+			),
 		})
 	}
-	if config.Alerting.Discord.Enabled && config.Alerting.Discord.WebhookURL != "" {
-		alerters = append(alerters, JSONWebhookAlerter{
-			url:         config.Alerting.Discord.WebhookURL,
-			userAgent:   "eyrie-discord/1.0",
-			contentType: "application/json",
-			buildBody:   buildDiscordBody,
+	for _, alert := range config.Alerting.Slack {
+		if !alert.Enabled || alert.WebhookURL == "" {
+			continue
+		}
+		alerters = append(alerters, NamedAlerter{
+			Name: strings.TrimSpace(alert.Name),
+			Alerter: JSONWebhookAlerter{
+				url:         alert.WebhookURL,
+				userAgent:   "eyrie-slack/1.0",
+				contentType: "application/json",
+				buildBody:   buildSlackBody,
+			},
 		})
 	}
-	if config.Alerting.Teams.Enabled && config.Alerting.Teams.WebhookURL != "" {
-		alerters = append(alerters, JSONWebhookAlerter{
-			url:         config.Alerting.Teams.WebhookURL,
-			userAgent:   "eyrie-teams/1.0",
-			contentType: "application/json",
-			buildBody:   buildTeamsBody,
+	for _, alert := range config.Alerting.Discord {
+		if !alert.Enabled || alert.WebhookURL == "" {
+			continue
+		}
+		alerters = append(alerters, NamedAlerter{
+			Name: strings.TrimSpace(alert.Name),
+			Alerter: JSONWebhookAlerter{
+				url:         alert.WebhookURL,
+				userAgent:   "eyrie-discord/1.0",
+				contentType: "application/json",
+				buildBody:   buildDiscordBody,
+			},
 		})
 	}
-	if config.Alerting.Ntfy.Enabled && config.Alerting.Ntfy.TopicURL != "" {
-		alerters = append(alerters, NtfyAlerter{
-			topicURL:    config.Alerting.Ntfy.TopicURL,
-			accessToken: config.Alerting.Ntfy.AccessToken,
-			username:    config.Alerting.Ntfy.Username,
-			password:    config.Alerting.Ntfy.Password,
+	for _, alert := range config.Alerting.Teams {
+		if !alert.Enabled || alert.WebhookURL == "" {
+			continue
+		}
+		alerters = append(alerters, NamedAlerter{
+			Name: strings.TrimSpace(alert.Name),
+			Alerter: JSONWebhookAlerter{
+				url:         alert.WebhookURL,
+				userAgent:   "eyrie-teams/1.0",
+				contentType: "application/json",
+				buildBody:   buildTeamsBody,
+			},
+		})
+	}
+	for _, alert := range config.Alerting.Ntfy {
+		if !alert.Enabled || alert.TopicURL == "" {
+			continue
+		}
+		wrapped := NtfyAlerter{
+			topicURL:    alert.TopicURL,
+			accessToken: alert.AccessToken,
+			username:    alert.Username,
+			password:    alert.Password,
+		}
+		suppressWindow := alert.SuppressWindowMinutes
+		if suppressWindow <= 0 {
+			suppressWindow = 15
+		}
+		digestInterval := alert.DigestIntervalMinutes
+		alerters = append(alerters, NamedAlerter{
+			Name:    strings.TrimSpace(alert.Name),
+			Alerter: NewBufferedNtfyAlerter(wrapped, suppressWindow, digestInterval),
 		})
 	}
 	return alerters
@@ -189,14 +202,6 @@ func buildAlertPresentation(alert AlertMessage) AlertPresentation {
 	}
 
 	return presentation
-}
-
-func buildNtfyTitle(alert AlertMessage) string {
-	if alert.Name == "" {
-		return strings.TrimSpace(buildAlertPresentation(alert).Title)
-	}
-
-	return alert.Name
 }
 
 func formatProviderAlertMessage(alert AlertMessage) string {

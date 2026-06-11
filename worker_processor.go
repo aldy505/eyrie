@@ -605,6 +605,7 @@ func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, cur
 		Reason:          alertReason,
 		OccurredAt:      time.Now().UTC(),
 		AffectedRegions: current.AffectedRegions,
+		AlertNames:      monitor.EffectiveAlertNames(),
 	}
 
 	alertBody, err := json.Marshal(alert)
@@ -612,13 +613,18 @@ func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, cur
 		return fmt.Errorf("marshaling alert message: %w", err)
 	}
 
+	metadata := map[string]string{
+		"monitor_id": monitor.ID,
+		"status":     current.Status,
+		"scope":      current.Scope,
+	}
+	if len(alert.AlertNames) > 0 {
+		metadata["alert_names"] = strings.Join(alert.AlertNames, ",")
+	}
+
 	return w.alerterProducer.Send(ctx, &pubsub.Message{
-		Body: alertBody,
-		Metadata: map[string]string{
-			"monitor_id": monitor.ID,
-			"status":     current.Status,
-			"scope":      current.Scope,
-		},
+		Body:     alertBody,
+		Metadata: metadata,
 	})
 }
 
