@@ -30,6 +30,7 @@ type AlertPresentation struct {
 
 type WebhookAlertPayload struct {
 	Message     string                `json:"message"`
+	Text        string                `json:"text"`
 	Title       string                `json:"title"`
 	Description string                `json:"description"`
 	Status      string                `json:"status"`
@@ -266,6 +267,7 @@ func buildWebhookPayload(alert AlertMessage) WebhookAlertPayload {
 
 	return WebhookAlertPayload{
 		Message:     message,
+		Text:        message,
 		Title:       fmt.Sprintf("%s is %s", alert.Name, status),
 		Description: description,
 		Status:      alertState,
