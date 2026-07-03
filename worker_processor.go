@@ -110,21 +110,22 @@ func (w *ProcessorWorker) Start() error {
 					continue
 				}
 
-				if err := w.syncProgrammaticIncident(ctx, monitor, evaluation); err != nil {
-					slog.ErrorContext(ctx, "syncing programmatic incident", slog.String("error", err.Error()))
-					message.Ack()
-					span.Finish()
-					cancel()
-					continue
-				}
+			incidentID, err := w.syncProgrammaticIncident(ctx, monitor, evaluation)
+			if err != nil {
+				slog.ErrorContext(ctx, "syncing programmatic incident", slog.String("error", err.Error()))
+				message.Ack()
+				span.Finish()
+				cancel()
+				continue
+			}
 
-				if err := w.publishAlert(ctx, monitor, evaluation, previous); err != nil {
-					slog.ErrorContext(ctx, "publishing alert", slog.String("error", err.Error()))
-					message.Ack()
-					span.Finish()
-					cancel()
-					continue
-				}
+			if err := w.publishAlert(ctx, monitor, evaluation, previous, incidentID); err != nil {
+				slog.ErrorContext(ctx, "publishing alert", slog.String("error", err.Error()))
+				message.Ack()
+				span.Finish()
+				cancel()
+				continue
+			}
 
 				sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.incident.transitions", 1, sentry.WithAttributes(attribute.String("previous_status", previous.Status), attribute.String("next_status", evaluation.Status), attribute.String("next_scope", evaluation.Scope), attribute.String("probe_type", string(monitor.EffectiveType()))))
 			}
@@ -591,7 +592,7 @@ func (w *ProcessorWorker) storeIncidentState(ctx context.Context, monitorID stri
 	return nil
 }
 
-func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, current IncidentEvaluation, previous IncidentEvaluation) error {
+func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, current IncidentEvaluation, previous IncidentEvaluation, incidentID string) error {
 	alertReason := current.Reason
 	if current.Status == MonitorStatusHealthy && previous.Status != MonitorStatusHealthy {
 		alertReason = fmt.Sprintf("Monitor recovered from %s %s", previous.Scope, previous.Status)
@@ -599,6 +600,7 @@ func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, cur
 
 	alert := AlertMessage{
 		MonitorID:       monitor.ID,
+		IncidentID:      incidentID,
 		Name:            monitor.Name,
 		Status:          current.Status,
 		Scope:           current.Scope,
@@ -628,22 +630,28 @@ func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, cur
 	})
 }
 
-func (w *ProcessorWorker) syncProgrammaticIncident(ctx context.Context, monitor Monitor, evaluation IncidentEvaluation) error {
+func (w *ProcessorWorker) syncProgrammaticIncident(ctx context.Context, monitor Monitor, evaluation IncidentEvaluation) (string, error) {
 	activeIncident, found, err := w.loadActiveProgrammaticIncident(ctx, monitor.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	switch {
 	case !evaluation.HasActiveIncident():
 		if !found {
-			return nil
+			return "", nil
 		}
-		return w.resolveProgrammaticIncident(ctx, activeIncident)
+		if err := w.resolveProgrammaticIncident(ctx, activeIncident); err != nil {
+			return "", err
+		}
+		return activeIncident.ID, nil
 	case !found:
 		return w.createProgrammaticIncident(ctx, monitor, evaluation)
 	default:
-		return w.updateProgrammaticIncident(ctx, activeIncident, monitor, evaluation)
+		if err := w.updateProgrammaticIncident(ctx, activeIncident, monitor, evaluation); err != nil {
+			return "", err
+		}
+		return activeIncident.ID, nil
 	}
 }
 
@@ -690,7 +698,7 @@ func (w *ProcessorWorker) loadActiveProgrammaticIncident(ctx context.Context, mo
 	return incident, true, nil
 }
 
-func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monitor Monitor, evaluation IncidentEvaluation) error {
+func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monitor Monitor, evaluation IncidentEvaluation) (string, error) {
 	now := time.Now().UTC()
 	incident := MonitorIncident{
 		ID:              uuid.NewString(),
@@ -713,7 +721,7 @@ func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monito
 
 	tx, err := w.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("beginning incident transaction: %w", err)
+		return "", fmt.Errorf("beginning incident transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -724,17 +732,17 @@ func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monito
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, incident.ID, incident.MonitorID, incident.Source, incident.LifecycleState, incident.AutoImpact, incident.Impact, incident.AutoTitle, incident.AutoBody, incident.Title, incident.Body, incident.Status, incident.Scope, incident.AffectedRegions, evaluation.FailureReasonsJSON(), incident.StartedAt, incident.CreatedAt, incident.UpdatedAt)
 	if err != nil {
-		return fmt.Errorf("inserting programmatic incident: %w", err)
+		return "", fmt.Errorf("inserting programmatic incident: %w", err)
 	}
 
 	if err := insertIncidentEventTx(ctx, tx, incident, IncidentEventTypeCreated, incident.Title, incident.Body, now); err != nil {
-		return err
+		return "", err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing incident transaction: %w", err)
+		return "", fmt.Errorf("committing incident transaction: %w", err)
 	}
-	return nil
+	return incident.ID, nil
 }
 
 func (w *ProcessorWorker) updateProgrammaticIncident(ctx context.Context, incident MonitorIncident, monitor Monitor, evaluation IncidentEvaluation) error {

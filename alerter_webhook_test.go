@@ -171,6 +171,96 @@ func TestBuildWebhookPayload(t *testing.T) {
 			t.Fatalf("metadata occurred_at is not RFC3339: %v", err)
 		}
 	})
+
+	t.Run("deduplication key is present", func(t *testing.T) {
+		alert := AlertMessage{
+			MonitorID:       "monitor-5",
+			Name:            "Queue Worker",
+			Status:          MonitorStatusDown,
+			AffectedRegions: []string{"us-east-1"},
+		}
+
+		payload := buildWebhookPayload(alert)
+
+		if payload.DeduplicationKey == "" {
+			t.Fatalf("expected deduplication_key to be populated")
+		}
+		if len(payload.DeduplicationKey) != 64 {
+			t.Fatalf("expected deduplication_key to be a 64-character hex SHA256, got %d chars", len(payload.DeduplicationKey))
+		}
+	})
+}
+
+func TestBuildDeduplicationKey(t *testing.T) {
+	t.Run("incident id produces stable key regardless of status", func(t *testing.T) {
+		base := AlertMessage{
+			MonitorID:       "monitor-1",
+			IncidentID:      "incident-abc-123",
+			Name:            "API Gateway",
+			Status:          MonitorStatusDown,
+			Scope:           MonitorScopeGlobal,
+			Reason:          "Initial outage",
+			AffectedRegions: []string{"us-east-1"},
+		}
+
+		firingKey := buildDeduplicationKey(base)
+
+		resolved := base
+		resolved.Status = MonitorStatusHealthy
+		resolved.Scope = MonitorScopeHealthy
+		resolved.Reason = "Monitor recovered"
+		resolved.AffectedRegions = []string{}
+
+		resolvedKey := buildDeduplicationKey(resolved)
+
+		if firingKey != resolvedKey {
+			t.Fatalf("expected same deduplication key for the same incident, got firing=%q resolved=%q", firingKey, resolvedKey)
+		}
+	})
+
+	t.Run("different incident ids produce different keys", func(t *testing.T) {
+		a := AlertMessage{IncidentID: "incident-a"}
+		b := AlertMessage{IncidentID: "incident-b"}
+
+		if buildDeduplicationKey(a) == buildDeduplicationKey(b) {
+			t.Fatal("expected different deduplication keys for different incident IDs")
+		}
+	})
+
+	t.Run("fallback is deterministic for same monitor state", func(t *testing.T) {
+		alert := AlertMessage{
+			MonitorID:       "monitor-2",
+			Status:          MonitorStatusDegraded,
+			Scope:           MonitorScopeLocal,
+			Reason:          "Latency spike",
+			AffectedRegions: []string{"eu-west-1", "us-east-1"},
+		}
+
+		first := buildDeduplicationKey(alert)
+		second := buildDeduplicationKey(alert)
+
+		if first != second {
+			t.Fatalf("expected deterministic fallback key, got %q and %q", first, second)
+		}
+	})
+
+	t.Run("fallback changes when state changes", func(t *testing.T) {
+		alert := AlertMessage{
+			MonitorID:       "monitor-3",
+			Status:          MonitorStatusDown,
+			Scope:           MonitorScopeGlobal,
+			AffectedRegions: []string{"us-east-1"},
+		}
+
+		keyBefore := buildDeduplicationKey(alert)
+
+		alert.AffectedRegions = []string{"us-east-1", "eu-west-1"}
+		keyAfter := buildDeduplicationKey(alert)
+
+		if keyBefore == keyAfter {
+			t.Fatal("expected deduplication key to change when affected regions change")
+		}
+	})
 }
 
 func TestProviderPayloadBuilders(t *testing.T) {
@@ -311,6 +401,9 @@ func TestWebhookAlerterSendAddsParityHeaders(t *testing.T) {
 	}
 	if decoded.Metadata.MonitorID != alert.MonitorID || decoded.Metadata.Status != alert.Status {
 		t.Fatalf("unexpected webhook body %+v", decoded)
+	}
+	if decoded.DeduplicationKey == "" {
+		t.Fatal("expected deduplication_key to be present in webhook payload")
 	}
 	if decoded.Status != "firing" {
 		t.Fatalf("expected top-level status firing, got %q", decoded.Status)
