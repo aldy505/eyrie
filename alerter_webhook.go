@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,12 +30,13 @@ type AlertPresentation struct {
 }
 
 type WebhookAlertPayload struct {
-	Message     string                `json:"message"`
-	Text        string                `json:"text"`
-	Title       string                `json:"title"`
-	Description string                `json:"description"`
-	Status      string                `json:"status"`
-	Metadata    WebhookAlertMetadata  `json:"metadata"`
+	Message           string               `json:"message"`
+	Text              string               `json:"text"`
+	Title             string               `json:"title"`
+	Description       string               `json:"description"`
+	Status            string               `json:"status"`
+	DeduplicationKey  string               `json:"deduplication_key"`
+	Metadata          WebhookAlertMetadata `json:"metadata"`
 }
 
 type WebhookAlertMetadata struct {
@@ -222,6 +224,23 @@ func buildAlertPresentation(alert AlertMessage) AlertPresentation {
 	return presentation
 }
 
+func buildDeduplicationKey(alert AlertMessage) string {
+	if alert.IncidentID != "" {
+		return sha256Hex(alert.IncidentID)
+	}
+
+	regions := append([]string(nil), alert.AffectedRegions...)
+	sort.Strings(regions)
+
+	return sha256Hex(fmt.Sprintf("%s|%s|%s|%s", alert.MonitorID, alert.Status, alert.Scope, strings.Join(regions, ",")))
+}
+
+func sha256Hex(input string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(input))
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 func buildWebhookPayload(alert AlertMessage) WebhookAlertPayload {
 	presentation := buildAlertPresentation(alert)
 
@@ -266,11 +285,12 @@ func buildWebhookPayload(alert AlertMessage) WebhookAlertPayload {
 	}
 
 	return WebhookAlertPayload{
-		Message:     message,
-		Text:        message,
-		Title:       fmt.Sprintf("%s is %s", alert.Name, status),
-		Description: description,
-		Status:      alertState,
+		Message:          message,
+		Text:             message,
+		Title:            fmt.Sprintf("%s is %s", alert.Name, status),
+		Description:      description,
+		Status:           alertState,
+		DeduplicationKey: buildDeduplicationKey(alert),
 		Metadata: WebhookAlertMetadata{
 			MonitorID:       alert.MonitorID,
 			Status:          status,

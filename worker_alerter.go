@@ -15,6 +15,7 @@ import (
 
 type AlertMessage struct {
 	MonitorID       string    `json:"monitor_id"`
+	IncidentID      string    `json:"incident_id,omitempty"`
 	Name            string    `json:"name"`
 	Status          string    `json:"status"`
 	Scope           string    `json:"scope"`

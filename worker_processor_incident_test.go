@@ -39,7 +39,7 @@ func TestProcessorWorker_SyncProgrammaticIncidentLifecycle(t *testing.T) {
 		Reason:          "Probe failures detected in all reporting regions (us-east-1, eu-west-1)",
 		AffectedRegions: []string{"eu-west-1", "us-east-1"},
 	}
-	if err := worker.syncProgrammaticIncident(t.Context(), monitor, initial); err != nil {
+	if _, err := worker.syncProgrammaticIncident(t.Context(), monitor, initial); err != nil {
 		t.Fatalf("failed to create programmatic incident: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestProcessorWorker_SyncProgrammaticIncidentLifecycle(t *testing.T) {
 		Reason:          "Regional degradation detected in us-east-1",
 		AffectedRegions: []string{"us-east-1"},
 	}
-	if err := worker.syncProgrammaticIncident(t.Context(), monitor, updated); err != nil {
+	if _, err := worker.syncProgrammaticIncident(t.Context(), monitor, updated); err != nil {
 		t.Fatalf("failed to update programmatic incident: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestProcessorWorker_SyncProgrammaticIncidentLifecycle(t *testing.T) {
 		t.Fatalf("expected 1 updated event, got %d", updatedEvents)
 	}
 
-	if err := worker.syncProgrammaticIncident(t.Context(), monitor, HealthyIncidentEvaluation()); err != nil {
+	if _, err := worker.syncProgrammaticIncident(t.Context(), monitor, HealthyIncidentEvaluation()); err != nil {
 		t.Fatalf("failed to resolve programmatic incident: %v", err)
 	}
 
