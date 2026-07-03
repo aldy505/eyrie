@@ -711,6 +711,13 @@ func (s *Server) buildMonitorIncidentsResponse(ctx context.Context) (MonitorInci
 	for _, metadata := range monitorMetadata {
 		monitorConfig, err := s.findMonitorConfig(metadata.ID)
 		if err != nil {
+			if errors.Is(err, ErrMonitorConfigNotFound) {
+				// Historical data can outlive monitor configuration after a monitor is
+				// removed or renamed. Skip stale monitor IDs to avoid failing the
+				// whole response for the remaining configured monitors.
+				slog.WarnContext(ctx, "skipping stale monitor without config in incidents response", slog.String("monitor_id", metadata.ID))
+				continue
+			}
 			slog.ErrorContext(ctx, "failed to load monitor config for incidents response", "monitor_id", metadata.ID, "error", err)
 			return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsLoadState, err)
 		}
