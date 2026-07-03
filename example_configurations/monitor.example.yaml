@@ -12,6 +12,8 @@ monitors:
     description: "This is an example monitor checking example.com"
     interval: "1m"
     type: "http"
+    alert_names:
+      - "team-platform"
     http:
       method: "GET"
       skip_tls_verify: false
@@ -24,6 +26,12 @@ monitors:
       headers:
         User-Agent: "EyrieMonitor/1.0"
       timeout_seconds: 30
+      # Optional per-monitor TLS files for private PKI or mTLS.
+      # They are reloaded for every probe so external certificate rotation is picked up.
+      # ca_cert_path: "/etc/eyrie/tls/ca.pem"
+      # client_cert_path: "/etc/eyrie/tls/client.crt"
+      # client_key_path: "/etc/eyrie/tls/client.key"
+      # client_key_password: "change-me"
   - id: "example-monitor-3"
     name: "Example Monitor 3"
     description: "This is an example monitor checking example.net"
@@ -73,6 +81,8 @@ monitors:
     type: "postgres"
     checker_names:
       - "us-east-1-public-checker"
+    alert_names:
+      - "team-auth"
     postgres:
       dsn: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       timeout_seconds: 10

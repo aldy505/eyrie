@@ -5,12 +5,450 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/guregu/null/v5"
+	"golang.org/x/sync/semaphore"
 )
+
+func TestResolveDuckDBReadConcurrencyLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured int
+		gomaxprocs int
+		want       int64
+	}{
+		{
+			name:       "uses configured limit when set",
+			configured: 7,
+			gomaxprocs: 8,
+			want:       7,
+		},
+		{
+			name:       "derives half of gomaxprocs when unset",
+			configured: 0,
+			gomaxprocs: 8,
+			want:       4,
+		},
+		{
+			name:       "keeps minimum of one permit",
+			configured: 0,
+			gomaxprocs: 1,
+			want:       1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveDuckDBReadConcurrencyLimit(tt.configured, tt.gomaxprocs); got != tt.want {
+				t.Fatalf("resolveDuckDBReadConcurrencyLimit(%d, %d) = %d, want %d", tt.configured, tt.gomaxprocs, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerPprofEndpointIsDisabledByDefault(t *testing.T) {
+	t.Setenv("ENABLE_PPROF_ENDPOINT", "")
+
+	server, err := NewServer(ServerOptions{
+		Database:      db,
+		ServerConfig:  ServerConfig{},
+		MonitorConfig: MonitorConfig{},
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.CloseCaches(); err != nil {
+			t.Fatalf("failed to close caches: %v", err)
+		}
+	})
+
+	ts := httptest.NewServer(server.Handler)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/debug/pprof/cmdline")
+	if err != nil {
+		t.Fatalf("failed to request pprof endpoint: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected spa fallback content type, got %q", got)
+	}
+}
+
+func TestServerPprofEndpointIsEnabledWithEnvVar(t *testing.T) {
+	t.Setenv("ENABLE_PPROF_ENDPOINT", "1")
+
+	server, err := NewServer(ServerOptions{
+		Database:      db,
+		ServerConfig:  ServerConfig{},
+		MonitorConfig: MonitorConfig{},
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.CloseCaches(); err != nil {
+			t.Fatalf("failed to close caches: %v", err)
+		}
+	})
+
+	ts := httptest.NewServer(server.Handler)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/debug/pprof/cmdline")
+	if err != nil {
+		t.Fatalf("failed to request pprof endpoint: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("expected pprof content type, got %q", got)
+	}
+}
+
+func TestServerRootBrowserUserAgentServesHTML(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("User-Agent", "Mozilla/5.0")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected HTML content type, got %q", got)
+	}
+	if got := recorder.Header().Values("Vary"); !slices.Equal(got, []string{"User-Agent", "Accept"}) {
+		t.Fatalf("expected Vary headers for browser root response, got %v", got)
+	}
+}
+
+func TestServerRootCLIUserAgentServesPrettyJSON(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{
+		MonitorID:     "root-json-monitor",
+		MonitorName:   "CLI JSON Monitor",
+		MonitorStatus: MonitorStatusDegraded,
+		MonitorScope:  MonitorScopeLocal,
+		Reason:        "Latency spike detected",
+		SeedEvent:     true,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("User-Agent", "curl/8.7.1")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected JSON content type, got %q", got)
+	}
+	if got := recorder.Header().Values("Vary"); !slices.Equal(got, []string{"User-Agent", "Accept"}) {
+		t.Fatalf("expected Vary headers for CLI root response, got %v", got)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("expected no-store cache control for CLI root response, got %q", got)
+	}
+	if !strings.Contains(recorder.Body.String(), "\n  \"format\": \"json\"") {
+		t.Fatalf("expected pretty-printed JSON body, got %q", recorder.Body.String())
+	}
+
+	var payload RootStatusResponse
+	if err := json.NewDecoder(strings.NewReader(recorder.Body.String())).Decode(&payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Format != "json" {
+		t.Fatalf("expected format=json, got %q", payload.Format)
+	}
+	if payload.Summary.Services != 1 {
+		t.Fatalf("expected 1 service in summary, got %d", payload.Summary.Services)
+	}
+	if len(payload.RecentEvents) != 1 {
+		t.Fatalf("expected 1 recent event, got %d", len(payload.RecentEvents))
+	}
+	if payload.Services[0].Status != MonitorStatusDegraded {
+		t.Fatalf("expected degraded service status, got %q", payload.Services[0].Status)
+	}
+}
+
+func TestServerRootMissingUserAgentDefaultsToCLIJSON(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected JSON content type, got %q", got)
+	}
+}
+
+func TestServerRootTextFormatCanBeRequestedByCLIClients(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{
+		MonitorID:     "root-text-monitor",
+		MonitorName:   "CLI Text Monitor",
+		MonitorStatus: MonitorStatusDown,
+		MonitorScope:  MonitorScopeGlobal,
+		Reason:        "Connection timeout",
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/?format=text", nil)
+	request.Header.Set("User-Agent", "wget/1.21")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("expected text content type, got %q", got)
+	}
+	if !strings.Contains(recorder.Body.String(), "Summary") {
+		t.Fatalf("expected summary section in text response, got %q", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "Connection timeout") {
+		t.Fatalf("expected incident reason in text response, got %q", recorder.Body.String())
+	}
+}
+
+func TestServerRootNonGETMethodsStillUseSPAFallback(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.Header.Set("User-Agent", "curl/8.7.1")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected HTML content type, got %q", got)
+	}
+}
+
+func TestServerNonRootPathsStillUseSPAFallbackForCLIClients(t *testing.T) {
+	server := newRootStatusTestServer(t, rootStatusTestSeedOptions{})
+
+	request := httptest.NewRequest(http.MethodGet, "/status/overview", nil)
+	request.Header.Set("User-Agent", "curl/8.7.1")
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("expected HTML content type, got %q", got)
+	}
+}
+
+func TestTruncateRootTextPreservesUTF8(t *testing.T) {
+	value := "東京サービス監視"
+	truncated := truncateRootText(value, 6)
+
+	if truncated != "東京サ..." {
+		t.Fatalf("expected rune-safe truncation, got %q", truncated)
+	}
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("expected valid UTF-8 output, got %q", truncated)
+	}
+}
+
+type rootStatusTestSeedOptions struct {
+	MonitorID     string
+	MonitorName   string
+	MonitorStatus string
+	MonitorScope  string
+	Reason        string
+	SeedEvent     bool
+}
+
+func newRootStatusTestServer(t *testing.T, options rootStatusTestSeedOptions) *Server {
+	t.Helper()
+
+	monitorID := options.MonitorID
+	if monitorID == "" {
+		monitorID = "root-status-monitor"
+	}
+
+	monitorName := options.MonitorName
+	if monitorName == "" {
+		monitorName = "Root Status Monitor"
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	cleanupRootStatusTestData(t, monitorID)
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                monitorName,
+				Description:         null.StringFrom("root endpoint test monitor"),
+				ExpectedStatusCodes: []int{200},
+				HTTP: &MonitorHTTPConfig{
+					URL: "https://example.com",
+				},
+			},
+		},
+	}
+
+	if options.MonitorStatus != "" {
+		conn, err := db.Conn(t.Context())
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+
+		ingesterWorker := &IngesterWorker{
+			db:            db,
+			monitorConfig: monitorConfig,
+			shutdown:      make(chan struct{}),
+		}
+
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			Success:    true,
+			LatencyMs:  123,
+			StatusCode: 200,
+			Timestamp:  now,
+			Timings:    CheckerTraceTimings{},
+		}
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to seed monitor historical: %v", err)
+		}
+
+		scope := options.MonitorScope
+		if scope == "" {
+			scope = MonitorScopeHealthy
+		}
+		if _, err := conn.ExecContext(t.Context(), `
+			INSERT INTO monitor_incident_state (
+				monitor_id, status, scope, affected_regions, reason, last_transition_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, monitorID, options.MonitorStatus, scope, `["us-east-1"]`, options.Reason, now, now); err != nil {
+			t.Fatalf("failed to seed monitor_incident_state: %v", err)
+		}
+
+		if options.SeedEvent {
+			if _, err := conn.ExecContext(t.Context(), `
+				INSERT INTO monitor_incident_events (
+					id, incident_id, monitor_id, event_type, source, lifecycle_state, impact, title, body, status, scope, affected_regions, created_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, monitorID+"-event", monitorID+"-incident", monitorID, IncidentEventTypeUpdated, IncidentSourceProgrammatic, IncidentLifecycleMonitoring, IncidentImpactPartialOutage, "Latency spike", options.Reason, options.MonitorStatus, scope, `["us-east-1"]`, now); err != nil {
+				t.Fatalf("failed to seed monitor_incident_events: %v", err)
+			}
+		}
+	}
+
+	serverConfig := ServerConfig{}
+	serverConfig.Metadata.Title = "Root Status Test"
+
+	server, err := NewServer(ServerOptions{
+		Database:      db,
+		ServerConfig:  serverConfig,
+		MonitorConfig: monitorConfig,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.CloseCaches(); err != nil {
+			t.Fatalf("failed to close caches: %v", err)
+		}
+		cleanupRootStatusTestData(t, monitorID)
+	})
+
+	return server
+}
+
+func cleanupRootStatusTestData(t *testing.T, monitorID string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection: %v", err)
+	}
+	defer conn.Close()
+
+	statements := []string{
+		`DELETE FROM monitor_incident_events WHERE monitor_id = ?`,
+		`DELETE FROM monitor_incidents WHERE monitor_id = ?`,
+		`DELETE FROM monitor_incident_state WHERE monitor_id = ?`,
+		`DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`,
+		`DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`,
+		`DELETE FROM monitor_historical WHERE monitor_id = ?`,
+	}
+
+	for _, statement := range statements {
+		if _, err := conn.ExecContext(ctx, statement, monitorID); err != nil {
+			t.Fatalf("failed to clean up root status test data: %v", err)
+		}
+	}
+}
+
+func TestServerWithDuckDBReadPermitWaitsForPermit(t *testing.T) {
+	server := &Server{
+		duckDBReadLimiter: semaphore.NewWeighted(1),
+	}
+
+	if err := server.duckDBReadLimiter.Acquire(t.Context(), 1); err != nil {
+		t.Fatalf("failed to acquire initial permit: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/uptime-data", nil)
+	handlerStarted := make(chan struct{})
+	handlerFinished := make(chan struct{})
+
+	go func() {
+		server.withDuckDBReadPermit(func(w http.ResponseWriter, r *http.Request) {
+			close(handlerStarted)
+			w.WriteHeader(http.StatusNoContent)
+		})(recorder, request)
+		close(handlerFinished)
+	}()
+
+	select {
+	case <-handlerStarted:
+		t.Fatal("handler should wait for permit before running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	server.duckDBReadLimiter.Release(1)
+
+	select {
+	case <-handlerFinished:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not complete after permit release")
+	}
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d", http.StatusNoContent, recorder.Code)
+	}
+}
 
 func TestServer_FetchFromAggregateMonitorHistorical(t *testing.T) {
 	monitorID := "test-aggregate-server-monitor"
@@ -244,6 +682,375 @@ func TestServer_FetchFromAggregateMonitorHistoricalUsesExpectedStatusCodes(t *te
 		if downtime.DurationMinutes != 0 {
 			t.Fatalf("expected zero downtime when custom expected status codes are healthy, got %d", downtime.DurationMinutes)
 		}
+	}
+}
+
+func TestServer_FetchFromAggregateMonitorHistoricalCachesHistoricalRows(t *testing.T) {
+	monitorID := "test-aggregate-server-cache"
+	today := utcDayStart(time.Now().UTC())
+	yesterday := today.AddDate(0, 0, -1)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                "Cache Monitor",
+				ExpectedStatusCodes: []int{200},
+			},
+		},
+	}
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
+	}
+
+	for i := 0; i < 2; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  int64(100 + (i * 100)),
+			StatusCode: 200,
+			Timestamp:  yesterday.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest yesterday monitor historical: %v", err)
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  int64(300 + (i * 100)),
+			StatusCode: 200,
+			Timestamp:  today.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest today monitor historical: %v", err)
+		}
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, yesterday); err != nil {
+		t.Fatalf("failed to aggregate yesterday monitor historical: %v", err)
+	}
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, today); err != nil {
+		t.Fatalf("failed to aggregate today monitor historical: %v", err)
+	}
+
+	server := &Server{
+		db:                            db,
+		serverConfig:                  ServerConfig{},
+		monitorConfig:                 monitorConfig,
+		historicalDailyAggregateCache: newTTLCache[[]MonitorHistoricalDailyAggregate](time.Hour),
+	}
+
+	first, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("failed to fetch from aggregate monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for cache test: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ? AND date = ?`, monitorID, yesterday.Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("failed to delete yesterday aggregate row: %v", err)
+	}
+
+	second, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("expected cached historical aggregates to satisfy second fetch: %v", err)
+	}
+
+	if first.MonitorAge != second.MonitorAge {
+		t.Fatalf("expected cached monitor age %d, got %d", first.MonitorAge, second.MonitorAge)
+	}
+	if first.LatencyMs != second.LatencyMs {
+		t.Fatalf("expected cached latency %d, got %d", first.LatencyMs, second.LatencyMs)
+	}
+	if len(first.DailyDowntimes) != len(second.DailyDowntimes) {
+		t.Fatalf("expected cached downtime count %d, got %d", len(first.DailyDowntimes), len(second.DailyDowntimes))
+	}
+}
+
+func TestServer_FetchFromAggregateMonitorHistoricalRefreshesTodayRows(t *testing.T) {
+	monitorID := "test-aggregate-server-refresh-today"
+	today := utcDayStart(time.Now().UTC())
+	yesterday := today.AddDate(0, 0, -1)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                "Today Refresh Monitor",
+				ExpectedStatusCodes: []int{200},
+			},
+		},
+	}
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
+	}
+
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		LatencyMs:  100,
+		StatusCode: 200,
+		Timestamp:  yesterday,
+		Timings:    CheckerTraceTimings{},
+	}, "us-east-1"); err != nil {
+		t.Fatalf("failed to ingest yesterday monitor historical: %v", err)
+	}
+
+	if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		LatencyMs:  200,
+		StatusCode: 200,
+		Timestamp:  today,
+		Timings:    CheckerTraceTimings{},
+	}, "us-east-1"); err != nil {
+		t.Fatalf("failed to ingest today monitor historical: %v", err)
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, yesterday); err != nil {
+		t.Fatalf("failed to aggregate yesterday monitor historical: %v", err)
+	}
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, today); err != nil {
+		t.Fatalf("failed to aggregate today monitor historical: %v", err)
+	}
+
+	server := &Server{
+		db:                            db,
+		serverConfig:                  ServerConfig{},
+		monitorConfig:                 monitorConfig,
+		historicalDailyAggregateCache: newTTLCache[[]MonitorHistoricalDailyAggregate](time.Hour),
+	}
+
+	first, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("failed to fetch aggregate monitor historical: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for cache refresh test: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ExecContext(ctx, `
+		UPDATE monitor_historical_daily_aggregate
+		SET avg_latency_ms = ?, success_rate = ?
+		WHERE monitor_id = ? AND date = ?
+	`, 400, 0, monitorID, today.Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("failed to update today's aggregate row: %v", err)
+	}
+
+	second, err := server.fetchFromAggregateMonitorHistorical(t.Context(), monitorID)
+	if err != nil {
+		t.Fatalf("failed to refresh today's aggregate data: %v", err)
+	}
+
+	if first.DailyDowntimes[0].DurationMinutes == second.DailyDowntimes[0].DurationMinutes {
+		t.Fatalf("expected today's downtime to refresh, but it stayed at %d", first.DailyDowntimes[0].DurationMinutes)
+	}
+}
+
+func TestServer_UptimeDataByRegionHandlerCachesHistoricalAggregates(t *testing.T) {
+	monitorID := "test-region-aggregate-cache"
+	today := utcDayStart(time.Now().UTC())
+	yesterday := today.AddDate(0, 0, -1)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_daily_aggregate table: %v", err)
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical_region_daily_aggregate WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical_region_daily_aggregate table: %v", err)
+		}
+	})
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  monitorID,
+				Name:                "Region Cache Monitor",
+				ExpectedStatusCodes: []int{200},
+			},
+		},
+	}
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
+	}
+
+	for _, item := range []struct {
+		date    time.Time
+		latency int64
+		status  int
+	}{
+		{date: yesterday, latency: 100, status: 200},
+		{date: today, latency: 200, status: 200},
+	} {
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			LatencyMs:  item.latency,
+			StatusCode: item.status,
+			Timestamp:  item.date,
+			Timings:    CheckerTraceTimings{},
+		}, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest monitor historical: %v", err)
+		}
+	}
+
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, yesterday); err != nil {
+		t.Fatalf("failed to aggregate yesterday monitor historical: %v", err)
+	}
+	if err := ingesterWorker.aggregateDailyMonitorHistorical(t.Context(), monitorID, today); err != nil {
+		t.Fatalf("failed to aggregate today monitor historical: %v", err)
+	}
+
+	server := &Server{
+		db:                                  db,
+		serverConfig:                        ServerConfig{},
+		monitorConfig:                       monitorConfig,
+		historicalRegionDailyAggregateCache: newTTLCache[[]MonitorHistoricalRegionDailyAggregate](time.Hour),
+	}
+
+	getResponse := func() UptimeDataByRegionResponse {
+		request := httptest.NewRequest(http.MethodGet, "/uptime-data-by-region?monitorId="+monitorID, nil)
+		recorder := httptest.NewRecorder()
+		server.UptimeDataByRegionHandler(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
+		}
+
+		var response UptimeDataByRegionResponse
+		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+			t.Fatalf("failed to decode region response: %v", err)
+		}
+
+		return response
+	}
+
+	first := getResponse()
+	if len(first.Monitors) != 1 {
+		t.Fatalf("expected one region, got %d", len(first.Monitors))
+	}
+	firstRegion := first.Monitors[0]
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for cache test: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ExecContext(ctx, `
+		DELETE FROM monitor_historical_region_daily_aggregate
+		WHERE monitor_id = ? AND date = ? AND region = ?
+	`, monitorID, yesterday.Format("2006-01-02"), "us-east-1")
+	if err != nil {
+		t.Fatalf("failed to delete yesterday region aggregate row: %v", err)
+	}
+
+	second := getResponse()
+	if len(second.Monitors) != 1 {
+		t.Fatalf("expected one region after cache hit, got %d", len(second.Monitors))
+	}
+	if second.Monitors[0].ResponseTimeMs != firstRegion.ResponseTimeMs {
+		t.Fatalf("expected cached historical region response time %d, got %d", firstRegion.ResponseTimeMs, second.Monitors[0].ResponseTimeMs)
+	}
+
+	_, err = conn.ExecContext(ctx, `
+		UPDATE monitor_historical_region_daily_aggregate
+		SET avg_latency_ms = ?, success_rate = ?
+		WHERE monitor_id = ? AND date = ? AND region = ?
+	`, 400, 0, monitorID, today.Format("2006-01-02"), "us-east-1")
+	if err != nil {
+		t.Fatalf("failed to update today's region aggregate row: %v", err)
+	}
+
+	third := getResponse()
+	if len(third.Monitors) != 1 {
+		t.Fatalf("expected one region after refresh, got %d", len(third.Monitors))
+	}
+	if third.Monitors[0].Downtimes[0].DurationMinutes == second.Monitors[0].Downtimes[0].DurationMinutes {
+		t.Fatalf("expected today's region downtime to refresh, but it stayed at %d", second.Monitors[0].Downtimes[0].DurationMinutes)
 	}
 }
 

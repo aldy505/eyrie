@@ -3,18 +3,21 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 type DatasetConfig struct {
-	RetentionDays                    int     `yaml:"retention_days" default:"90"`
-	ProcessingLookbackMinutes        int     `yaml:"processing_lookback_minutes" default:"10"`
-	PerRegionFailureThresholdPercent float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
-	FailureThresholdPercent          float64 `yaml:"failure_threshold_percent" default:"50.0"`
-	DegradedThresholdMinutes         int     `yaml:"degraded_threshold_minutes" default:"10"`
-	FailureThresholdMinutes          int     `yaml:"failure_threshold_minutes" default:"15"`
+	RetentionDays                       int     `yaml:"retention_days" default:"90"`
+	ProcessingLookbackMinutes           int     `yaml:"processing_lookback_minutes" default:"10"`
+	PerRegionFailureThresholdPercent    float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
+	FailureThresholdPercent             float64 `yaml:"failure_threshold_percent" default:"50.0"`
+	DegradedThresholdMinutes            int     `yaml:"degraded_threshold_minutes" default:"10"`
+	DegradedThresholdConsecutiveBuckets int     `yaml:"degraded_threshold_consecutive_buckets" default:"5"`
+	FailureThresholdMinutes             int     `yaml:"failure_threshold_minutes" default:"15"`
 }
 
 type WebhookAlertingConfig struct {
+	Name          string            `yaml:"name"`
 	Enabled       bool              `yaml:"enabled"`
 	URL           string            `yaml:"url"`
 	HmacSecret    string            `yaml:"hmac_secret"`
@@ -22,27 +25,32 @@ type WebhookAlertingConfig struct {
 }
 
 type SlackAlertingConfig struct {
+	Name       string `yaml:"name"`
 	Enabled    bool   `yaml:"enabled"`
 	WebhookURL string `yaml:"webhook_url"`
 }
 
 type DiscordAlertingConfig struct {
+	Name       string `yaml:"name"`
 	Enabled    bool   `yaml:"enabled"`
 	WebhookURL string `yaml:"webhook_url"`
 }
 
 type TeamsAlertingConfig struct {
+	Name       string `yaml:"name"`
 	Enabled    bool   `yaml:"enabled"`
 	WebhookURL string `yaml:"webhook_url"`
 }
 
 type NtfyAlertingConfig struct {
-	Enabled     bool   `yaml:"enabled"`
-	TopicURL    string `yaml:"topic_url"`
-	AccessToken string `yaml:"access_token"`
-	Username    string `yaml:"username"`
-	Password    string `yaml:"password"`
-	Priority    int    `yaml:"priority" default:"3"`
+	Name                  string `yaml:"name"`
+	Enabled               bool   `yaml:"enabled"`
+	TopicURL              string `yaml:"topic_url"`
+	AccessToken           string `yaml:"access_token"`
+	Username              string `yaml:"username"`
+	Password              string `yaml:"password"`
+	SuppressWindowMinutes int    `yaml:"suppress_window_minutes" default:"15"`
+	DigestIntervalMinutes int    `yaml:"digest_interval_minutes" default:"60"`
 }
 
 type RegisteredChecker struct {
@@ -72,8 +80,21 @@ type ServerConfig struct {
 	} `yaml:"metadata"`
 	RegisteredCheckers []RegisteredChecker `yaml:"registered_checkers"`
 	Database           struct {
-		Path string `yaml:"path" default:"eyrie.db"`
+		Path                 string `yaml:"path" default:"eyrie.db"`
+		ReadConcurrencyLimit int    `yaml:"read_concurrency_limit" default:"0"`
 	} `yaml:"database"`
+	Cache struct {
+		Backend string `yaml:"backend" default:"memory"`
+		Redis   struct {
+			Address       string `yaml:"address"`
+			Username      string `yaml:"username"`
+			Password      string `yaml:"password"`
+			DB            int    `yaml:"db" default:"0"`
+			Prefix        string `yaml:"prefix" default:"eyrie:uptime-cache"`
+			TLS           bool   `yaml:"tls" default:"false"`
+			SkipTLSVerify bool   `yaml:"skip_tls_verify" default:"false"`
+		} `yaml:"redis"`
+	} `yaml:"cache"`
 	TaskQueue struct {
 		Processor struct {
 			ProducerAddress string `yaml:"producer_address" default:"mem://processor_tasks"`
@@ -90,11 +111,11 @@ type ServerConfig struct {
 	} `yaml:"task_queue"`
 	Dataset  DatasetConfig `yaml:"dataset"`
 	Alerting struct {
-		Webhook WebhookAlertingConfig `yaml:"webhook"`
-		Slack   SlackAlertingConfig   `yaml:"slack"`
-		Discord DiscordAlertingConfig `yaml:"discord"`
-		Teams   TeamsAlertingConfig   `yaml:"teams"`
-		Ntfy    NtfyAlertingConfig    `yaml:"ntfy"`
+		Webhook []WebhookAlertingConfig `yaml:"webhook"`
+		Slack   []SlackAlertingConfig   `yaml:"slack"`
+		Discord []DiscordAlertingConfig `yaml:"discord"`
+		Teams   []TeamsAlertingConfig   `yaml:"teams"`
+		Ntfy    []NtfyAlertingConfig    `yaml:"ntfy"`
 	} `yaml:"alerting"`
 	Sentry struct {
 		Dsn                   string  `yaml:"dsn"`
@@ -126,6 +147,62 @@ func (c ServerConfig) Validate() error {
 		seenAPIKeys[checker.ApiKey] = struct{}{}
 	}
 
+	if c.Database.ReadConcurrencyLimit < 0 {
+		return fmt.Errorf("database.read_concurrency_limit must be zero or greater")
+	}
+
+	switch strings.ToLower(strings.TrimSpace(c.Cache.Backend)) {
+	case "", "memory":
+	case "redis":
+		if c.Cache.Redis.Address == "" {
+			return fmt.Errorf("cache.redis.address is required when cache.backend is redis")
+		}
+	default:
+		return fmt.Errorf("cache.backend must be either memory or redis")
+	}
+
+	seenAlertNames := make(map[string]string)
+	for idx, alert := range c.Alerting.Webhook {
+		if err := validateAlertName(seenAlertNames, "alerting.webhook", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Slack {
+		if err := validateAlertName(seenAlertNames, "alerting.slack", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Discord {
+		if err := validateAlertName(seenAlertNames, "alerting.discord", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Teams {
+		if err := validateAlertName(seenAlertNames, "alerting.teams", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+	for idx, alert := range c.Alerting.Ntfy {
+		if err := validateAlertName(seenAlertNames, "alerting.ntfy", idx, alert.Name); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateAlertName(seen map[string]string, path string, idx int, name string) error {
+	trimmedName := strings.TrimSpace(name)
+	if trimmedName == "" {
+		return fmt.Errorf("%s[%d].name is required", path, idx)
+	}
+
+	location := fmt.Sprintf("%s[%d]", path, idx)
+	if previous, exists := seen[trimmedName]; exists {
+		return fmt.Errorf("%s: duplicate alert name %q already defined at %s", location, trimmedName, previous)
+	}
+
+	seen[trimmedName] = location
 	return nil
 }
 

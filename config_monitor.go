@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/guregu/null/v5"
@@ -24,6 +25,10 @@ const (
 type MonitorHTTPConfig struct {
 	Method              string            `yaml:"method" json:"method" default:"GET"`
 	SkipTLSVerify       *bool             `yaml:"skip_tls_verify" json:"skip_tls_verify,omitempty"`
+	CACertPath          string            `yaml:"ca_cert_path" json:"ca_cert_path,omitempty"`
+	ClientCertPath      string            `yaml:"client_cert_path" json:"client_cert_path,omitempty"`
+	ClientKeyPath       string            `yaml:"client_key_path" json:"client_key_path,omitempty"`
+	ClientKeyPassword   string            `yaml:"client_key_password" json:"client_key_password,omitempty"`
 	URL                 string            `yaml:"url" json:"url"`
 	Headers             map[string]string `yaml:"headers" json:"headers"`
 	ExpectedStatusCodes []int             `yaml:"expected_status_codes" json:"-"`
@@ -82,6 +87,7 @@ type Monitor struct {
 	Interval     string      `yaml:"interval" json:"interval" default:"1m"`
 	Type         MonitorType `yaml:"type" json:"type" default:"http"`
 	CheckerNames []string    `yaml:"checker_names" json:"checker_names,omitempty"`
+	AlertNames   []string    `yaml:"alert_names" json:"alert_names,omitempty"`
 
 	// Legacy top-level HTTP fields are preserved for backwards compatibility.
 	Method              string            `yaml:"method" json:"method" default:"GET"`
@@ -291,11 +297,45 @@ func (m Monitor) RunsOnChecker(checkerName string) bool {
 	return len(m.CheckerNames) == 0 || slices.Contains(m.CheckerNames, checkerName)
 }
 
+func (m Monitor) EffectiveAlertNames() []string {
+	if len(m.AlertNames) == 0 {
+		return nil
+	}
+
+	seenNames := make(map[string]struct{}, len(m.AlertNames))
+	alertNames := make([]string, 0, len(m.AlertNames))
+	for _, alertName := range m.AlertNames {
+		trimmedName := strings.TrimSpace(alertName)
+		if trimmedName == "" {
+			continue
+		}
+		if _, exists := seenNames[trimmedName]; exists {
+			continue
+		}
+
+		seenNames[trimmedName] = struct{}{}
+		alertNames = append(alertNames, trimmedName)
+	}
+
+	if len(alertNames) == 0 {
+		return nil
+	}
+
+	return alertNames
+}
+
 func (m Monitor) Validate() error {
 	switch m.EffectiveType() {
 	case MonitorTypeHTTP:
-		if m.EffectiveHTTP().URL == "" {
+		httpConfig := m.EffectiveHTTP()
+		if httpConfig.URL == "" {
 			return fmt.Errorf("monitor %s: http.url is required", m.ID)
+		}
+		if (httpConfig.ClientCertPath == "") != (httpConfig.ClientKeyPath == "") {
+			return fmt.Errorf("monitor %s: http.client_cert_path and http.client_key_path must be set together", m.ID)
+		}
+		if httpConfig.ClientKeyPassword != "" && httpConfig.ClientKeyPath == "" {
+			return fmt.Errorf("monitor %s: http.client_key_password requires http.client_key_path", m.ID)
 		}
 	case MonitorTypeTCP:
 		if m.TCP.Address == "" {

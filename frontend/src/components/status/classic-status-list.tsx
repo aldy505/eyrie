@@ -1,12 +1,15 @@
 import { useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   ChevronDown,
   ChevronUp,
   Clock3,
   Globe2,
+  Lock,
   MapPin,
   Server,
+  Unlock,
 } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type {
@@ -22,6 +25,7 @@ import {
   formatFailureReasonsBreakdown,
   formatScope,
   formatStatus,
+  formatDowntime,
   friendlyFailureReasonName,
   getAvailabilityBarColor,
   getAvailabilityRatio,
@@ -77,7 +81,7 @@ function ClassicUptimeBars({ monitor, metadata }: { monitor: SingleMonitor; meta
           const title = [
             formatStatus(availabilityStatus),
             `Availability: ${formatAvailability(availabilityRatio)}`,
-            `Downtime: ${downtimeMinutes} minutes`,
+            `Downtime: ${formatDowntime(downtimeMinutes)}`,
           ].join(" • ");
 
           return (
@@ -319,6 +323,7 @@ function ClassicMonitorCard({
       {children.map((child) => {
         const incident = incidents.get(child.id);
         const regions = regionMap[child.id] ?? [];
+        const tls = child.tls;
         return (
           <article
             key={child.id}
@@ -341,6 +346,24 @@ function ClassicMonitorCard({
                   <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
                     {incident?.probe_type ?? "http"}
                   </span>
+                  {tls?.is_https ? (
+                    tls.is_expired ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/20 px-3 py-1 text-xs font-semibold text-rose-300">
+                        <AlertTriangle className="h-3 w-3" />
+                        CERT EXPIRED
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold text-emerald-300">
+                        <Lock className="h-3 w-3" />
+                        HTTPS
+                      </span>
+                    )
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-500/20 px-3 py-1 text-xs font-semibold text-slate-400">
+                      <Unlock className="h-3 w-3" />
+                      HTTP
+                    </span>
+                  )}
                 </div>
                 {child.description && <p className="break-words text-sm text-slate-300">{child.description}</p>}
                 <div className="flex flex-wrap gap-4 text-sm text-slate-300">
@@ -356,7 +379,19 @@ function ClassicMonitorCard({
                     <Clock3 className="h-4 w-4 text-violet-300" />
                     {child.age} days tracked
                   </span>
+                  {tls?.is_https && tls.subject && (
+                    <span className="inline-flex items-center gap-1 text-xs text-slate-400">
+                      <Lock className="h-3 w-3 text-slate-500" />
+                      {tls.subject}
+                    </span>
+                  )}
                 </div>
+                {tls?.is_https && tls.not_after && (
+                  <p className={`text-xs ${tls.is_expired ? "text-rose-400" : "text-slate-500"}`}>
+                    Certificate expires: {tls.not_after}
+                    {tls.is_expired && " (EXPIRED)"}
+                  </p>
+                )}
               </div>
               <div className="min-w-0 w-full space-y-2 text-sm text-slate-300 lg:max-w-xl lg:flex-1">
                 <p className="break-words font-medium text-white">{incident?.reason || "No active incident."}</p>

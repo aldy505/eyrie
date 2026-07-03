@@ -11,6 +11,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
+	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,15 +26,19 @@ import (
 	"github.com/guregu/null/v5"
 	"github.com/rs/cors"
 	"gocloud.dev/pubsub"
+	"golang.org/x/sync/semaphore"
 )
 
 type Server struct {
 	*http.Server
-	db                *sql.DB
-	serverConfig      ServerConfig
-	monitorConfig     MonitorConfig
-	processorProducer *pubsub.Topic
-	ingesterProducer  *pubsub.Topic
+	db                                  *sql.DB
+	serverConfig                        ServerConfig
+	monitorConfig                       MonitorConfig
+	processorProducer                   *pubsub.Topic
+	ingesterProducer                    *pubsub.Topic
+	duckDBReadLimiter                   *semaphore.Weighted
+	historicalDailyAggregateCache       uptimeAggregateCache[[]MonitorHistoricalDailyAggregate]
+	historicalRegionDailyAggregateCache uptimeAggregateCache[[]MonitorHistoricalRegionDailyAggregate]
 }
 
 type ServerOptions struct {
@@ -46,12 +53,29 @@ type ServerOptions struct {
 var frontendFilesystem embed.FS
 
 func NewServer(options ServerOptions) (*Server, error) {
+	duckDBReadLimit := resolveDuckDBReadConcurrencyLimit(
+		options.ServerConfig.Database.ReadConcurrencyLimit,
+		runtime.GOMAXPROCS(0),
+	)
+
 	s := &Server{
 		db:                options.Database,
 		serverConfig:      options.ServerConfig,
 		monitorConfig:     options.MonitorConfig,
 		processorProducer: options.ProcessorProducer,
 		ingesterProducer:  options.IngesterProducer,
+		duckDBReadLimiter: semaphore.NewWeighted(duckDBReadLimit),
+	}
+
+	var err error
+	s.historicalDailyAggregateCache, err = newUptimeAggregateCache[[]MonitorHistoricalDailyAggregate](options.ServerConfig, "uptime:daily", uptimeDataCacheTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating daily aggregate cache: %w", err)
+	}
+
+	s.historicalRegionDailyAggregateCache, err = newUptimeAggregateCache[[]MonitorHistoricalRegionDailyAggregate](options.ServerConfig, "uptime:region-daily", uptimeDataCacheTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating region aggregate cache: %w", err)
 	}
 
 	// Create a sub-filesystem rooted at frontend/dist so we can reference index.html directly
@@ -73,12 +97,17 @@ func NewServer(options ServerOptions) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /config", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.ConfigHandler)))
-	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataHandler)))
-	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataByRegionHandler)))
-	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.MonitorIncidentsHandler)))
+	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.UptimeDataHandler))))
+	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.UptimeDataByRegionHandler))))
+	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.MonitorIncidentsHandler))))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
-	mux.Handle("/", SpaHandler(distFS, "index.html"))
+	if os.Getenv("ENABLE_PPROF_ENDPOINT") == "1" {
+		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	}
+	spa := &spaHandler{fileSystem: distFS, indexFile: "index.html"}
+	mux.Handle("GET /{$}", sentryMiddleware.HandleFunc(s.RootHandler(spa)))
+	mux.Handle("/", spa)
 
 	srv := &http.Server{
 		Addr:    net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
@@ -88,6 +117,264 @@ func NewServer(options ServerOptions) (*Server, error) {
 	s.Server = srv
 
 	return s, nil
+}
+
+func resolveDuckDBReadConcurrencyLimit(configured int, gomaxprocs int) int64 {
+	if configured > 0 {
+		return int64(configured)
+	}
+
+	derivedLimit := gomaxprocs / 2
+	if derivedLimit < 1 {
+		derivedLimit = 1
+	}
+
+	return int64(derivedLimit)
+}
+
+func aggregateCacheKey(monitorID string, day time.Time) string {
+	return monitorID + ":" + utcDayStart(day).Format("2006-01-02")
+}
+
+func (s *Server) loadHistoricalDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ? AND date < ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(beforeDate).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying historical daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning historical daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating historical daily aggregates: %w", err)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) loadHistoricalDailyAggregatesForDate(ctx context.Context, monitorID string, day time.Time) ([]MonitorHistoricalDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_daily_aggregate
+		WHERE monitor_id = ? AND date = ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(day).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying current day daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning current day daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating current day daily aggregates: %w", err)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) historicalDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalDailyAggregate, error) {
+	if s.historicalDailyAggregateCache == nil {
+		return s.loadHistoricalDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	}
+
+	key := aggregateCacheKey(monitorID, beforeDate)
+	return s.historicalDailyAggregateCache.getOrLoadContext(ctx, key, func(ctx context.Context) ([]MonitorHistoricalDailyAggregate, error) {
+		return s.loadHistoricalDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	})
+}
+
+func (s *Server) loadHistoricalRegionDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_region_daily_aggregate
+		WHERE monitor_id = ? AND date < ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(beforeDate).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying historical region daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalRegionDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalRegionDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Region,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning historical region daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating historical region daily aggregates: %w", err)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) loadHistoricalRegionDailyAggregatesForDate(ctx context.Context, monitorID string, day time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
+		FROM monitor_historical_region_daily_aggregate
+		WHERE monitor_id = ? AND date = ?
+		ORDER BY date ASC
+	`, monitorID, utcDayStart(day).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("querying current day region daily aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	var aggregates []MonitorHistoricalRegionDailyAggregate
+	for rows.Next() {
+		var aggregate MonitorHistoricalRegionDailyAggregate
+		if err := rows.Scan(
+			&aggregate.MonitorID,
+			&aggregate.Region,
+			&aggregate.Date,
+			&aggregate.AvgLatencyMs,
+			&aggregate.MinLatencyMs,
+			&aggregate.MaxLatencyMs,
+			&aggregate.SuccessRate,
+		); err != nil {
+			return nil, fmt.Errorf("scanning current day region daily aggregate: %w", err)
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating current day region daily aggregates: %w", err)
+	}
+
+	return aggregates, nil
+}
+
+func (s *Server) historicalRegionDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
+	if s.historicalRegionDailyAggregateCache == nil {
+		return s.loadHistoricalRegionDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	}
+
+	key := aggregateCacheKey(monitorID, beforeDate)
+	return s.historicalRegionDailyAggregateCache.getOrLoadContext(ctx, key, func(ctx context.Context) ([]MonitorHistoricalRegionDailyAggregate, error) {
+		return s.loadHistoricalRegionDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
+	})
+}
+
+func (s *Server) CloseCaches() error {
+	if s == nil {
+		return nil
+	}
+
+	if s.historicalDailyAggregateCache != nil {
+		if err := s.historicalDailyAggregateCache.close(); err != nil {
+			return err
+		}
+	}
+
+	if s.historicalRegionDailyAggregateCache != nil {
+		if err := s.historicalRegionDailyAggregateCache.close(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) withDuckDBReadPermit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.duckDBReadLimiter == nil {
+			next(w, r)
+			return
+		}
+
+		if err := s.acquireDuckDBReadPermit(r.Context()); err != nil {
+			if hub := sentry.GetHubFromContext(r.Context()); hub != nil {
+				hub.CaptureException(fmt.Errorf("acquiring duckdb read permit: %w", err))
+			}
+			slog.WarnContext(r.Context(), "request cancelled while waiting for duckdb read capacity", slog.String("error", err.Error()))
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(CommonErrorResponse{
+				Error: "request cancelled while waiting for database capacity",
+			})
+			return
+		}
+		defer s.duckDBReadLimiter.Release(1)
+
+		next(w, r)
+	}
+}
+
+func (s *Server) acquireDuckDBReadPermit(ctx context.Context) error {
+	if s.duckDBReadLimiter == nil {
+		return nil
+	}
+
+	return s.duckDBReadLimiter.Acquire(ctx, 1)
 }
 
 type CommonErrorResponse struct {
@@ -106,17 +393,30 @@ type UptimeDataHistorical struct {
 	DailyDowntimes map[int]struct {
 		DurationMinutes int `json:"duration_minutes"`
 	}
+	TLS *UptimeDataTLSInfo
+}
+
+type UptimeDataTLSInfo struct {
+	Version     string `json:"version,omitempty"`
+	Cipher      string `json:"cipher,omitempty"`
+	NotAfter    string `json:"not_after,omitempty"`
+	Issuer      string `json:"issuer,omitempty"`
+	Subject     string `json:"subject,omitempty"`
+	DN          string `json:"dn,omitempty"`
+	IsExpired   bool   `json:"is_expired"`
+	IsHttps     bool   `json:"is_https"`
 }
 
 type UptimeDataHandlerSingleMonitor struct {
-	ID             string      `json:"id"`
-	Name           string      `json:"name"`
-	Description    null.String `json:"description,omitempty"`
-	ResponseTimeMs int64       `json:"response_time_ms"`
-	Age            int         `json:"age"`
+	ID             string                  `json:"id"`
+	Name           string                  `json:"name"`
+	Description    null.String             `json:"description,omitempty"`
+	ResponseTimeMs int64                   `json:"response_time_ms"`
+	Age            int                     `json:"age"`
 	Downtimes      map[int]struct {
 		DurationMinutes int `json:"duration_minutes"`
 	} `json:"downtimes"`
+	TLS             *UptimeDataTLSInfo `json:"tls,omitempty"`
 }
 
 type UptimeDataHandlerMonitorType string
@@ -160,21 +460,21 @@ type UptimeDataByRegionResponse struct {
 }
 
 type MonitorIncidentSummary struct {
-	MonitorID                  string              `json:"monitor_id"`
-	Name                       string              `json:"name"`
-	ProbeType                  string              `json:"probe_type"`
-	Status                     string              `json:"status"`
-	Scope                      string              `json:"scope"`
-	Reason                     string              `json:"reason"`
-	AffectedRegions            []string            `json:"affected_regions"`
-	FailureReasonsBreakdown    map[string][]string `json:"failure_reasons_breakdown,omitempty"`
-	LastTransitionAt           time.Time           `json:"last_transition_at"`
-	UpdatedAt                  time.Time           `json:"updated_at"`
-	IncidentID                 string              `json:"incident_id,omitempty"`
-	IncidentSource             string              `json:"incident_source,omitempty"`
-	IncidentLifecycleState     string              `json:"incident_lifecycle_state,omitempty"`
-	IncidentImpact             string              `json:"incident_impact,omitempty"`
-	IncidentTitle              string              `json:"incident_title,omitempty"`
+	MonitorID               string              `json:"monitor_id"`
+	Name                    string              `json:"name"`
+	ProbeType               string              `json:"probe_type"`
+	Status                  string              `json:"status"`
+	Scope                   string              `json:"scope"`
+	Reason                  string              `json:"reason"`
+	AffectedRegions         []string            `json:"affected_regions"`
+	FailureReasonsBreakdown map[string][]string `json:"failure_reasons_breakdown,omitempty"`
+	LastTransitionAt        time.Time           `json:"last_transition_at"`
+	UpdatedAt               time.Time           `json:"updated_at"`
+	IncidentID              string              `json:"incident_id,omitempty"`
+	IncidentSource          string              `json:"incident_source,omitempty"`
+	IncidentLifecycleState  string              `json:"incident_lifecycle_state,omitempty"`
+	IncidentImpact          string              `json:"incident_impact,omitempty"`
+	IncidentTitle           string              `json:"incident_title,omitempty"`
 }
 
 type MonitorIncidentsResponse struct {
@@ -182,15 +482,20 @@ type MonitorIncidentsResponse struct {
 	Incidents   []MonitorIncidentSummary `json:"incidents"`
 }
 
+var (
+	errMonitorIncidentsFetchMonitorIDs = errors.New("failed to fetch monitor ids")
+	errMonitorIncidentsLoadState       = errors.New("failed to load incident state")
+)
+
 func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	response, err := s.buildUptimeDataResponse(ctx)
 	if err != nil {
 		if hub := sentry.GetHubFromContext(ctx); hub != nil {
-			hub.CaptureException(fmt.Errorf("fetching valid monitor ids: %w", err))
+			hub.CaptureException(fmt.Errorf("building uptime data response: %w", err))
 		}
-		slog.ErrorContext(ctx, "fetching valid monitor ids", slog.String("error", err.Error()))
+		slog.ErrorContext(ctx, "building uptime data response", slog.String("error", err.Error()))
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(CommonErrorResponse{
@@ -199,18 +504,29 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandlerResponse, error) {
+	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	if err != nil {
+		return UptimeDataHandlerResponse{}, err
+	}
+
 	wg := sync.WaitGroup{}
 	mutex := sync.Mutex{}
 	m := make(map[string]UptimeDataHistorical)
 
 	for _, monitor := range monitorMetadata {
 		wg.Go(func() {
-			historical, err := s.fetchFromRawMonitorHistorical(ctx, monitor.ID)
-			if err != nil {
+			historical, historicalErr := s.fetchFromRawMonitorHistorical(ctx, monitor.ID)
+			if historicalErr != nil {
 				if hub := sentry.GetHubFromContext(ctx); hub != nil {
-					hub.CaptureException(fmt.Errorf("fetching monitor historical for monitor %s: %w", monitor.ID, err))
+					hub.CaptureException(fmt.Errorf("fetching monitor historical for monitor %s: %w", monitor.ID, historicalErr))
 				}
-				slog.ErrorContext(ctx, "fetching monitor historical", slog.String("monitor_id", monitor.ID), slog.String("error", err.Error()))
+				slog.ErrorContext(ctx, "fetching monitor historical", slog.String("monitor_id", monitor.ID), slog.String("error", historicalErr.Error()))
 				return
 			}
 
@@ -223,25 +539,21 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	response := UptimeDataHandlerResponse{
-		LastUpdated: time.Now(),
+		LastUpdated: time.Now().UTC(),
 		Monitors:    []UptimeDataHandlerMonitorGroup{},
 	}
 	var uptimeDataHandlerMonitorGroup []UptimeDataHandlerMonitorGroup
 
-	// Build an index for monitor metadata to avoid O(n*m) lookups
 	monitorIndexByID := make(map[string]int, len(monitorMetadata))
 	for i, monitor := range monitorMetadata {
 		monitorIndexByID[monitor.ID] = i
 	}
 
-	// Prioritize group first
 	for _, group := range s.monitorConfig.Groups {
 		var groupMonitors []UptimeDataHandlerSingleMonitor
-		for _, monitorId := range group.MonitorIDs {
-			slog.InfoContext(ctx, "Trying to find monitor id: "+monitorId)
-			if idx, ok := monitorIndexByID[monitorId]; ok {
+		for _, monitorID := range group.MonitorIDs {
+			if idx, ok := monitorIndexByID[monitorID]; ok {
 				monitor := monitorMetadata[idx]
-				slog.InfoContext(ctx, "Found monitor ID "+monitor.ID+" for group ID "+group.ID)
 				if historical, exists := m[monitor.ID]; exists {
 					groupMonitors = append(groupMonitors, UptimeDataHandlerSingleMonitor{
 						ID:             monitor.ID,
@@ -250,6 +562,7 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 						ResponseTimeMs: historical.LatencyMs,
 						Age:            historical.MonitorAge,
 						Downtimes:      historical.DailyDowntimes,
+						TLS:            historical.TLS,
 					})
 				}
 			}
@@ -262,14 +575,12 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 			Description: group.Description,
 			Monitors:    groupMonitors,
 		})
-		slog.InfoContext(ctx, "Added group ID into the response.Monitors")
 	}
 
-	// Then add single monitors that are not part of any group
 	monitorsInGroups := make(map[string]bool)
 	for _, group := range s.monitorConfig.Groups {
-		for _, monitorId := range group.MonitorIDs {
-			monitorsInGroups[monitorId] = true
+		for _, monitorID := range group.MonitorIDs {
+			monitorsInGroups[monitorID] = true
 		}
 	}
 
@@ -284,6 +595,7 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 					ResponseTimeMs: historical.LatencyMs,
 					Age:            historical.MonitorAge,
 					Downtimes:      historical.DailyDowntimes,
+					TLS:            historical.TLS,
 				})
 			}
 		}
@@ -304,9 +616,7 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	response.Monitors = uptimeDataHandlerMonitorGroup
 
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(response)
+	return response, nil
 }
 
 func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Request) {
@@ -353,76 +663,13 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var monitors []UptimeDataByRegionMonitor
-	for region, historicals := range regionData {
-		// Group each monitor historicals on a daily bucket
-		dailyBucket := make(map[time.Time][]MonitorHistorical)
-		for _, mh := range historicals {
-			year, month, day := mh.CreatedAt.Date()
-			bucketDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-			if _, exists := dailyBucket[bucketDate]; !exists {
-				dailyBucket[bucketDate] = []MonitorHistorical{}
-			}
-			dailyBucket[bucketDate] = append(dailyBucket[bucketDate], mh)
-		}
-
-		var regionMonitor = UptimeDataByRegionMonitor{
-			Region:         region,
-			ResponseTimeMs: 0,
-			Age:            len(dailyBucket),
-			Downtimes: make(map[int]struct {
-				DurationMinutes int `json:"duration_minutes"`
-			}),
-		}
-
-		// Calculate stats for each day
-		for date, dayHistoricals := range dailyBucket {
-			var totalLatency int64 = 0
-			var totalChecks int64 = 0
-			var downtimeMinutes int = 0
-
-			for _, mh := range dayHistoricals {
-				totalLatency += int64(mh.LatencyMs)
-				totalChecks++
-
-				if !monitorConfig.IsSuccessfulStatus(mh.StatusCode, mh.Success) {
-					downtimeMinutes += 1 // assuming each check is done every minute
-				}
-			}
-
-			averageLatency := totalLatency / totalChecks
-			regionMonitor.ResponseTimeMs += averageLatency
-
-			// Calculate downtime index (days ago from now)
-			now := time.Now().UTC()
-			dailyDowntimesIndex := int(now.Sub(date).Hours() / 24)
-			regionMonitor.Downtimes[dailyDowntimesIndex] = struct {
-				DurationMinutes int `json:"duration_minutes"`
-			}{
-				DurationMinutes: downtimeMinutes,
-			}
-		}
-
-		// Calculate overall average latency for this region
-		if len(dailyBucket) > 0 {
-			regionMonitor.ResponseTimeMs = regionMonitor.ResponseTimeMs / int64(len(dailyBucket))
-		}
-
-		monitors = append(monitors, regionMonitor)
-	}
-
-	// Sort monitors by region name for consistent output
-	slices.SortStableFunc(monitors, func(a, b UptimeDataByRegionMonitor) int {
-		return strings.Compare(a.Region, b.Region)
-	})
-
 	response := UptimeDataByRegionResponse{
 		LastUpdated: time.Now(),
 		Metadata: UptimeDataByRegionMetadata{
 			Name:        monitorConfig.Name,
 			Description: monitorConfig.Description,
 		},
-		Monitors: monitors,
+		Monitors: regionData,
 	}
 
 	w.Header().Set("content-type", "application/json")
@@ -433,12 +680,31 @@ func (s *Server) UptimeDataByRegionHandler(w http.ResponseWriter, r *http.Reques
 func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	response, err := s.buildMonitorIncidentsResponse(ctx)
 	if err != nil {
+		message := "failed to build incidents response"
+		switch {
+		case errors.Is(err, errMonitorIncidentsFetchMonitorIDs):
+			message = "failed to fetch monitor ids"
+		case errors.Is(err, errMonitorIncidentsLoadState):
+			message = "failed to load incident state"
+		}
+
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to fetch monitor ids"})
+		_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: message})
 		return
+	}
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) buildMonitorIncidentsResponse(ctx context.Context) (MonitorIncidentsResponse, error) {
+	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
+	if err != nil {
+		return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsFetchMonitorIDs, err)
 	}
 
 	incidents := make([]MonitorIncidentSummary, 0, len(monitorMetadata))
@@ -446,26 +712,17 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 		monitorConfig, err := s.findMonitorConfig(metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load monitor config for incidents response", "monitor_id", metadata.ID, "error", err)
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
-			return
+			return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsLoadState, err)
 		}
 		state, err := s.fetchIncidentState(ctx, metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load incident state for monitor", "monitor_id", metadata.ID, "error", err)
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
-			return
+			return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsLoadState, err)
 		}
 		activeIncident, activeFound, err := s.fetchActiveIncident(ctx, metadata.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load active incident for monitor", "monitor_id", metadata.ID, "error", err)
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{Error: "failed to load incident state"})
-			return
+			return MonitorIncidentsResponse{}, fmt.Errorf("%w: %v", errMonitorIncidentsLoadState, err)
 		}
 
 		summary := MonitorIncidentSummary{
@@ -497,12 +754,10 @@ func (s *Server) MonitorIncidentsHandler(w http.ResponseWriter, r *http.Request)
 		return strings.Compare(a.MonitorID, b.MonitorID)
 	})
 
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(MonitorIncidentsResponse{
+	return MonitorIncidentsResponse{
 		LastUpdated: time.Now().UTC(),
 		Incidents:   incidents,
-	})
+	}, nil
 }
 
 func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorMetadata, error) {
@@ -753,105 +1008,163 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 	// Calculate overall average latency
 	uptimeHistorical.LatencyMs = uptimeHistorical.LatencyMs / int64(len(dailyBucket))
 
+	// Fetch TLS info from the latest row
+	tlsInfo, tlsErr := s.fetchLatestTLSInfo(ctx, monitorId)
+	if tlsErr == nil && tlsInfo != nil {
+		uptimeHistorical.TLS = tlsInfo
+	}
+
 	return uptimeHistorical, nil
+}
+
+func (s *Server) fetchLatestTLSInfo(ctx context.Context, monitorId string) (*UptimeDataTLSInfo, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting db connection: %w", err)
+	}
+	defer conn.Close()
+
+	var tlsVersion, tlsCipher, tlsCertIssuer, tlsCertSubject, tlsCertDN, tlsCertFingerprint null.String
+	var tlsExpiry, tlsCertNotBefore null.Time
+	var tlsCertIsExpired bool
+
+	err = conn.QueryRowContext(ctx, `
+		SELECT
+			tls_version,
+			tls_cipher,
+			tls_expiry,
+			tls_cert_not_before,
+			tls_cert_issuer,
+			tls_cert_subject,
+			tls_cert_dn,
+			tls_cert_fingerprint,
+			tls_cert_is_expired
+		FROM
+			monitor_historical
+		WHERE
+			monitor_id = ?
+		ORDER BY
+			created_at DESC
+		LIMIT 1`,
+		monitorId,
+	).Scan(
+		&tlsVersion,
+		&tlsCipher,
+		&tlsExpiry,
+		&tlsCertNotBefore,
+		&tlsCertIssuer,
+		&tlsCertSubject,
+		&tlsCertDN,
+		&tlsCertFingerprint,
+		&tlsCertIsExpired,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("querying latest TLS info: %w", err)
+	}
+
+	// Determine if this monitor uses HTTPS based on TLS version being present
+	isHttps := !tlsVersion.IsZero()
+
+	// If we have TLS data, build the info struct
+	if isHttps || !tlsCertIssuer.IsZero() || !tlsCertSubject.IsZero() {
+		tlsInfo := &UptimeDataTLSInfo{
+			IsHttps: isHttps,
+		}
+		if !tlsVersion.IsZero() {
+			tlsInfo.Version = tlsVersion.String
+		}
+		if !tlsCipher.IsZero() {
+			tlsInfo.Cipher = tlsCipher.String
+		}
+		if !tlsExpiry.IsZero() {
+			tlsInfo.NotAfter = tlsExpiry.Time.UTC().Format(time.RFC3339)
+		}
+		if !tlsCertIssuer.IsZero() {
+			tlsInfo.Issuer = tlsCertIssuer.String
+		}
+		if !tlsCertSubject.IsZero() {
+			tlsInfo.Subject = tlsCertSubject.String
+		}
+		if !tlsCertDN.IsZero() {
+			tlsInfo.DN = tlsCertDN.String
+		}
+		tlsInfo.IsExpired = tlsCertIsExpired
+		return tlsInfo, nil
+	}
+
+	return nil, nil
 }
 
 // fetchFromAggregateMonitorHistorical fetches monitor historical data from the aggregate table
 func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
-	const (
-		minutesPerDay   = 1440
-		checksPerMinute = 1
-		checksPerDay    = minutesPerDay * checksPerMinute
-	)
-
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Aggregate Monitor Historical"))
 	ctx = span.Context()
 	defer span.Finish()
 
-	conn, err := s.db.Conn(ctx)
+	today := utcDayStart(time.Now().UTC())
+	historicalAggregates, err := s.historicalDailyAggregatesBeforeDate(ctx, monitorId, today)
 	if err != nil {
-		return UptimeDataHistorical{}, fmt.Errorf("getting db connection: %w", err)
+		return UptimeDataHistorical{}, fmt.Errorf("loading historical aggregate monitor data: %w", err)
 	}
-	defer conn.Close()
 
-	// Query aggregated data
-	rows, err := conn.QueryContext(ctx, `
-		SELECT
-			date,
-			avg_latency_ms,
-			success_rate
-		FROM
-			monitor_historical_daily_aggregate
-		WHERE
-			monitor_id = ?
-		ORDER BY date DESC`,
-		monitorId,
-	)
+	todayAggregates, err := s.loadHistoricalDailyAggregatesForDate(ctx, monitorId, today)
 	if err != nil {
-		return UptimeDataHistorical{}, fmt.Errorf("querying aggregate monitor historical: %w", err)
-	}
-	defer rows.Close()
-
-	var aggregates []MonitorHistoricalDailyAggregate
-	for rows.Next() {
-		var aggregate MonitorHistoricalDailyAggregate
-		if err := rows.Scan(&aggregate.Date, &aggregate.AvgLatencyMs, &aggregate.SuccessRate); err != nil {
-			return UptimeDataHistorical{}, fmt.Errorf("scanning aggregate monitor historical: %w", err)
-		}
-		aggregates = append(aggregates, aggregate)
+		return UptimeDataHistorical{}, fmt.Errorf("loading current day aggregate monitor data: %w", err)
 	}
 
+	aggregates := append(historicalAggregates, todayAggregates...)
 	if len(aggregates) == 0 {
 		return UptimeDataHistorical{}, fmt.Errorf("no aggregate data found for monitor %s", monitorId)
 	}
 
-	var uptimeHistorical = UptimeDataHistorical{
-		LatencyMs:  0,
-		MonitorAge: len(aggregates),
-		DailyDowntimes: make(map[int]struct {
-			DurationMinutes int `json:"duration_minutes"`
-		}),
-	}
-
-	// Calculate average latency and downtime from aggregates
-	var totalLatency int64 = 0
-	now := time.Now().UTC()
-
-	for _, aggregate := range aggregates {
-		totalLatency += int64(aggregate.AvgLatencyMs)
-
-		// Calculate downtime based on success rate
-		// If success rate is 80%, that means 20% downtime
-		// Assuming checks are done every minute, and there are 1440 minutes in a day
-		// downtime_minutes = (100 - success_rate) * 1440 / 100
-		downtimeMinutes := (100 - aggregate.SuccessRate) * minutesPerDay / 100
-
-		// Calculate the index for DailyDowntimes map
-		// The index represents days ago from now
-		// Use date-based calculation to avoid floating-point precision issues
-		year, month, day := aggregate.Date.Date()
-		aggregateDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-		nowYear, nowMonth, nowDay := now.Date()
-		nowDate := time.Date(nowYear, nowMonth, nowDay, 0, 0, 0, 0, time.UTC)
-		dailyDowntimesIndex := int(nowDate.Sub(aggregateDate) / (24 * time.Hour))
-
-		uptimeHistorical.DailyDowntimes[dailyDowntimesIndex] = struct {
-			DurationMinutes int `json:"duration_minutes"`
-		}{
-			DurationMinutes: downtimeMinutes,
-		}
-	}
-
-	// Calculate overall average latency
-	if len(aggregates) > 0 {
-		uptimeHistorical.LatencyMs = totalLatency / int64(len(aggregates))
-	}
-
-	return uptimeHistorical, nil
+	return summarizeUptimeHistoricalAggregates(aggregates), nil
 }
 
-func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, monitorId string) (map[string][]MonitorHistorical, error) {
-	// Fetch monitor historical data grouped by region
+func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, monitorId string) ([]UptimeDataByRegionMonitor, error) {
+	regionData, err := s.fetchMonitorHistoricalGroupedByRegionFromAggregates(ctx, monitorId)
+	if err == nil {
+		return regionData, nil
+	}
+
+	slog.InfoContext(ctx, "falling back to raw monitor historical by region", slog.String("monitor_id", monitorId), slog.String("error", err.Error()))
+
+	rawRegionData, rawErr := s.fetchMonitorHistoricalGroupedByRegionRaw(ctx, monitorId)
+	if rawErr != nil {
+		return nil, rawErr
+	}
+
+	monitorConfig, err := s.findMonitorConfig(monitorId)
+	if err != nil {
+		return nil, err
+	}
+
+	return summarizeUptimeRegionHistoricalRows(rawRegionData, monitorConfig), nil
+}
+
+func (s *Server) fetchMonitorHistoricalGroupedByRegionFromAggregates(ctx context.Context, monitorId string) ([]UptimeDataByRegionMonitor, error) {
+	today := utcDayStart(time.Now().UTC())
+	historicalAggregates, err := s.historicalRegionDailyAggregatesBeforeDate(ctx, monitorId, today)
+	if err != nil {
+		return nil, fmt.Errorf("loading historical region aggregate monitor data: %w", err)
+	}
+
+	todayAggregates, err := s.loadHistoricalRegionDailyAggregatesForDate(ctx, monitorId, today)
+	if err != nil {
+		return nil, fmt.Errorf("loading current day region aggregate monitor data: %w", err)
+	}
+
+	aggregates := append(historicalAggregates, todayAggregates...)
+	if len(aggregates) == 0 {
+		return nil, fmt.Errorf("no aggregate data found for monitor %s", monitorId)
+	}
+
+	return summarizeRegionHistoricalAggregates(aggregates), nil
+}
+
+func (s *Server) fetchMonitorHistoricalGroupedByRegionRaw(ctx context.Context, monitorId string) (map[string][]MonitorHistorical, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		if hub := sentry.GetHubFromContext(ctx); hub != nil {
@@ -867,7 +1180,6 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 		}
 	}()
 
-	// Query all monitor historical data for this monitor
 	rows, err := conn.QueryContext(ctx, `
 		SELECT
 			region,
@@ -901,7 +1213,10 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegion(ctx context.Context, moni
 		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
 	}
 
-	// Group by region and calculate stats for each region
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating monitor historical: %w", err)
+	}
+
 	regionData := make(map[string][]MonitorHistorical)
 	for _, mh := range monitorHistoricals {
 		regionData[mh.Region] = append(regionData[mh.Region], mh)
@@ -957,6 +1272,18 @@ func (s *Server) CheckerRegistration(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s.monitorConfig.ForChecker(checkerName))
 }
 
+type TLSCertificateInfo struct {
+	Version     null.String `json:"version,omitempty"`
+	Cipher      null.String `json:"cipher,omitempty"`
+	NotBefore   null.Time   `json:"not_before,omitempty"`
+	NotAfter    null.Time   `json:"not_after,omitempty"`
+	Issuer      null.String `json:"issuer,omitempty"`
+	Subject     null.String `json:"subject,omitempty"`
+	DN          null.String `json:"dn,omitempty"`
+	Fingerprint null.String `json:"fingerprint,omitempty"`
+	IsExpired   bool        `json:"is_expired"`
+}
+
 type CheckerSubmissionRequest struct {
 	MonitorID       string              `json:"monitor_id"`
 	ProbeType       string              `json:"probe_type,omitempty"`
@@ -969,6 +1296,7 @@ type CheckerSubmissionRequest struct {
 	TlsVersion      null.String         `json:"tls_version,omitempty"`
 	TlsCipher       null.String         `json:"tls_cipher,omitempty"`
 	TlsExpiry       null.Time           `json:"tls_expiry,omitempty"`
+	TlsCertInfo     TLSCertificateInfo  `json:"tls_cert_info,omitempty"`
 	Timestamp       time.Time           `json:"timestamp"`
 	Timings         CheckerTraceTimings `json:"timings,omitempty"`
 }
@@ -1079,23 +1407,28 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 }
 
 type ConfigHandlerResponse struct {
-	Title                    string `json:"title"`
-	ShowLastUpdated          bool   `json:"show_last_updated"`
-	RetentionDays            int    `json:"retention_days"`
-	DegradedThresholdMinutes int    `json:"degraded_threshold_minutes"`
-	FailureThresholdMinutes  int    `json:"failure_threshold_minutes"`
+	Title                               string `json:"title"`
+	ShowLastUpdated                     bool   `json:"show_last_updated"`
+	RetentionDays                       int    `json:"retention_days"`
+	DegradedThresholdMinutes            int    `json:"degraded_threshold_minutes"`
+	DegradedThresholdConsecutiveBuckets int    `json:"degraded_threshold_consecutive_buckets"`
+	FailureThresholdMinutes             int    `json:"failure_threshold_minutes"`
 }
 
 func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
-	response := ConfigHandlerResponse{
-		Title:                    s.serverConfig.Metadata.Title,
-		ShowLastUpdated:          s.serverConfig.Metadata.ShowLastUpdated,
-		RetentionDays:            s.serverConfig.Dataset.RetentionDays,
-		DegradedThresholdMinutes: s.serverConfig.Dataset.DegradedThresholdMinutes,
-		FailureThresholdMinutes:  s.serverConfig.Dataset.FailureThresholdMinutes,
-	}
-
+	response := s.buildConfigResponse()
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) buildConfigResponse() ConfigHandlerResponse {
+	return ConfigHandlerResponse{
+		Title:                               s.serverConfig.Metadata.Title,
+		ShowLastUpdated:                     s.serverConfig.Metadata.ShowLastUpdated,
+		RetentionDays:                       s.serverConfig.Dataset.RetentionDays,
+		DegradedThresholdMinutes:            s.serverConfig.Dataset.DegradedThresholdMinutes,
+		DegradedThresholdConsecutiveBuckets: s.serverConfig.Dataset.DegradedThresholdConsecutiveBuckets,
+		FailureThresholdMinutes:             s.serverConfig.Dataset.FailureThresholdMinutes,
+	}
 }

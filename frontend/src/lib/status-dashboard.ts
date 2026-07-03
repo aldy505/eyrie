@@ -1,5 +1,16 @@
 import { z } from "zod";
 
+const tlsInfoSchema = z.object({
+  version: z.string().optional(),
+  cipher: z.string().optional(),
+  not_after: z.string().optional(),
+  issuer: z.string().optional(),
+  subject: z.string().optional(),
+  dn: z.string().optional(),
+  is_expired: z.boolean(),
+  is_https: z.boolean(),
+});
+
 const singleMonitorSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -12,6 +23,7 @@ const singleMonitorSchema = z.object({
       duration_minutes: z.number(),
     }),
   ),
+  tls: tlsInfoSchema.nullable().optional(),
 });
 
 export const uptimeDataSchema = z.object({
@@ -79,6 +91,7 @@ export type Metadata = z.infer<typeof metadataSchema>;
 export type IncidentsData = z.infer<typeof incidentsSchema>;
 export type RegionData = z.infer<typeof regionSchema>;
 export type SingleMonitor = z.infer<typeof singleMonitorSchema>;
+export type TLSInfo = z.infer<typeof tlsInfoSchema>;
 export type UptimeData = {
   last_updated: RawUptimeData["last_updated"];
   monitors: Array<{
@@ -213,6 +226,25 @@ export function formatLatency(latencyMs: number) {
 
 export function formatDaysAgo(days: number) {
   return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+export function formatDowntime(durationMinutes: number) {
+  if (durationMinutes === 0) {
+    return "0 minutes";
+  }
+
+  const hours = Math.floor(durationMinutes / 60);
+  const minutes = durationMinutes % 60;
+
+  if (hours === 0) {
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+
+  if (minutes === 0) {
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+
+  return `${hours} hour${hours === 1 ? "" : "s"} ${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
 export function friendlyFailureReasonName(category: string): string {

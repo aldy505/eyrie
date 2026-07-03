@@ -12,8 +12,10 @@ import (
 // defaultTestDatasetConfig returns a DatasetConfig with default threshold values for tests
 func defaultTestDatasetConfig() DatasetConfig {
 	return DatasetConfig{
-		PerRegionFailureThresholdPercent: 40.0,
-		FailureThresholdPercent:          50.0,
+		PerRegionFailureThresholdPercent:    40.0,
+		FailureThresholdPercent:             50.0,
+		DegradedThresholdMinutes:            5,
+		DegradedThresholdConsecutiveBuckets: 5,
 	}
 }
 
@@ -1311,15 +1313,15 @@ func TestProcessorWorker_BuildFailureReasonsBreakdown(t *testing.T) {
 		// Create submissions: timeout from us-east-1, timeout from eu-west-1
 		submissions := []MonitorHistorical{
 			{
-				Success:      false,
-				CreatedAt:    baseTime.Add(30 * time.Second),
-				Region:       "us-east-1",
+				Success:       false,
+				CreatedAt:     baseTime.Add(30 * time.Second),
+				Region:        "us-east-1",
 				FailureReason: null.StringFrom("connection timeout"),
 			},
 			{
-				Success:      false,
-				CreatedAt:    baseTime.Add(45 * time.Second),
-				Region:       "eu-west-1",
+				Success:       false,
+				CreatedAt:     baseTime.Add(45 * time.Second),
+				Region:        "eu-west-1",
 				FailureReason: null.StringFrom("connection timeout"),
 			},
 		}
@@ -1439,8 +1441,8 @@ func TestProcessorWorker_BuildFailureReasonsBreakdown(t *testing.T) {
 				TotalCount:   3,
 				FailureCount: 3,
 				Regions: map[string]bool{
-					"us-east-1": false,
-					"eu-west-1": false,
+					"us-east-1":  false,
+					"eu-west-1":  false,
 					"ap-south-1": false,
 				},
 			},
@@ -1531,6 +1533,99 @@ func TestProcessorWorker_BuildFailureReasonsBreakdown(t *testing.T) {
 			}
 		} else {
 			t.Errorf("Expected connection_refused category, got %v", result)
+		}
+	})
+}
+
+func TestProcessorWorker_EvaluateLatestIncident_LocalDegradedPromotion(t *testing.T) {
+	monitor := Monitor{
+		ID:                  "test-monitor",
+		Name:                "Test monitor",
+		ExpectedStatusCodes: []int{200},
+	}
+
+	newWorker := func(cfg DatasetConfig) *ProcessorWorker {
+		return &ProcessorWorker{
+			datasetConfig: cfg,
+		}
+	}
+
+	baseTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	minuteInterval := time.Minute
+
+	t.Run("single local degraded bucket stays healthy until promoted", func(t *testing.T) {
+		worker := newWorker(defaultTestDatasetConfig())
+		submissions := []MonitorHistorical{
+			{Region: "us-east-1", StatusCode: 500, CreatedAt: baseTime},
+			{Region: "us-west-1", StatusCode: 200, CreatedAt: baseTime},
+			{Region: "eu-west-1", StatusCode: 200, CreatedAt: baseTime},
+		}
+
+		buckets, earliestTime, latestTime := worker.groupSubmissionByMinute(submissions, minuteInterval, monitor)
+		evaluation := worker.evaluateLatestIncident(buckets, submissions, latestTime, earliestTime, minuteInterval)
+
+		if evaluation.Status != MonitorStatusHealthy {
+			t.Fatalf("expected healthy evaluation before local degradation threshold, got %+v", evaluation)
+		}
+	})
+
+	t.Run("local degraded promotes after configured consecutive buckets", func(t *testing.T) {
+		worker := newWorker(defaultTestDatasetConfig())
+		var submissions []MonitorHistorical
+		for minute := 0; minute < 5; minute++ {
+			bucketTime := baseTime.Add(time.Duration(minute) * minuteInterval)
+			submissions = append(submissions,
+				MonitorHistorical{Region: "us-east-1", StatusCode: 500, CreatedAt: bucketTime},
+				MonitorHistorical{Region: "us-west-1", StatusCode: 200, CreatedAt: bucketTime},
+				MonitorHistorical{Region: "eu-west-1", StatusCode: 200, CreatedAt: bucketTime},
+			)
+		}
+
+		buckets, earliestTime, latestTime := worker.groupSubmissionByMinute(submissions, minuteInterval, monitor)
+		evaluation := worker.evaluateLatestIncident(buckets, submissions, latestTime, earliestTime, minuteInterval)
+
+		if evaluation.Status != MonitorStatusDegraded || evaluation.Scope != MonitorScopeLocal {
+			t.Fatalf("expected promoted local degraded evaluation, got %+v", evaluation)
+		}
+	})
+
+	t.Run("elapsed minutes can promote before consecutive bucket threshold", func(t *testing.T) {
+		cfg := defaultTestDatasetConfig()
+		cfg.DegradedThresholdMinutes = 3
+		cfg.DegradedThresholdConsecutiveBuckets = 10
+		worker := newWorker(cfg)
+
+		var submissions []MonitorHistorical
+		for minute := 0; minute < 3; minute++ {
+			bucketTime := baseTime.Add(time.Duration(minute) * minuteInterval)
+			submissions = append(submissions,
+				MonitorHistorical{Region: "us-east-1", StatusCode: 500, CreatedAt: bucketTime},
+				MonitorHistorical{Region: "us-west-1", StatusCode: 200, CreatedAt: bucketTime},
+				MonitorHistorical{Region: "eu-west-1", StatusCode: 200, CreatedAt: bucketTime},
+			)
+		}
+
+		buckets, earliestTime, latestTime := worker.groupSubmissionByMinute(submissions, minuteInterval, monitor)
+		evaluation := worker.evaluateLatestIncident(buckets, submissions, latestTime, earliestTime, minuteInterval)
+
+		if evaluation.Status != MonitorStatusDegraded || evaluation.Scope != MonitorScopeLocal {
+			t.Fatalf("expected local degraded promotion from elapsed minutes threshold, got %+v", evaluation)
+		}
+	})
+
+	t.Run("global down still alerts immediately", func(t *testing.T) {
+		worker := newWorker(defaultTestDatasetConfig())
+		submissions := []MonitorHistorical{
+			{Region: "us-east-1", StatusCode: 500, CreatedAt: baseTime},
+			{Region: "us-west-1", StatusCode: 500, CreatedAt: baseTime},
+			{Region: "eu-west-1", StatusCode: 500, CreatedAt: baseTime},
+		}
+
+		buckets, earliestTime, latestTime := worker.groupSubmissionByMinute(submissions, minuteInterval, monitor)
+		evaluation := worker.evaluateLatestIncident(buckets, submissions, latestTime, earliestTime, minuteInterval)
+
+		if evaluation.Status != MonitorStatusDown || evaluation.Scope != MonitorScopeGlobal {
+			t.Fatalf("expected immediate global down evaluation, got %+v", evaluation)
 		}
 	})
 }

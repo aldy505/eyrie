@@ -145,7 +145,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber, monitorConfig)
+		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber, monitorConfig, serverConfig.Dataset)
 		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig, serverConfig.Dataset)
 		alerterWorker := NewAlerterWorker(alerterSubscriber, BuildAlerters(serverConfig))
 
@@ -173,6 +173,10 @@ func main() {
 
 			if err := srv.Shutdown(shutdownCtx); err != nil {
 				slog.Error("failed to shutdown server", slog.String("error", err.Error()))
+			}
+
+			if err := srv.CloseCaches(); err != nil {
+				slog.Error("failed to close uptime caches", slog.String("error", err.Error()))
 			}
 
 			if err := alerterWorker.Stop(); err != nil {

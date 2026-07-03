@@ -18,6 +18,12 @@ type MonitorHistorical struct {
 	TlsVersion                null.String `db:"tls_version"`
 	TlsCipher                 null.String `db:"tls_cipher"`
 	TlsExpiry                 null.Time   `db:"tls_expiry"`
+	TlsCertNotBefore          null.Time   `db:"tls_cert_not_before"`
+	TlsCertIssuer             null.String `db:"tls_cert_issuer"`
+	TlsCertSubject            null.String `db:"tls_cert_subject"`
+	TlsCertDN                 null.String `db:"tls_cert_dn"`
+	TlsCertFingerprint        null.String `db:"tls_cert_fingerprint"`
+	TlsCertIsExpired          bool        `db:"tls_cert_is_expired"`
 	TimingConnAcquiredMs      null.Int    `db:"timing_conn_acquired_ms"`
 	TimingFirstResponseByteMs null.Int    `db:"timing_first_response_byte_ms"`
 	TimingDNSLookupStartMs    null.Int    `db:"timing_dns_lookup_start_ms"`
@@ -37,15 +43,25 @@ type MonitorHistoricalDailyAggregate struct {
 	SuccessRate  int       `db:"success_rate"`
 }
 
+type MonitorHistoricalRegionDailyAggregate struct {
+	MonitorID    string    `db:"monitor_id"`
+	Region       string    `db:"region"`
+	Date         time.Time `db:"date"`
+	AvgLatencyMs int       `db:"avg_latency_ms"`
+	MinLatencyMs int       `db:"min_latency_ms"`
+	MaxLatencyMs int       `db:"max_latency_ms"`
+	SuccessRate  int       `db:"success_rate"`
+}
+
 type MonitorIncidentState struct {
-	MonitorID             string    `db:"monitor_id"`
-	Status                string    `db:"status"`
-	Scope                 string    `db:"scope"`
-	AffectedRegions       string    `db:"affected_regions"`
-	Reason                string    `db:"reason"`
-	FailureReasonsJson    string    `db:"failure_reasons_json"`
-	LastTransitionAt      time.Time `db:"last_transition_at"`
-	UpdatedAt             time.Time `db:"updated_at"`
+	MonitorID          string    `db:"monitor_id"`
+	Status             string    `db:"status"`
+	Scope              string    `db:"scope"`
+	AffectedRegions    string    `db:"affected_regions"`
+	Reason             string    `db:"reason"`
+	FailureReasonsJson string    `db:"failure_reasons_json"`
+	LastTransitionAt   time.Time `db:"last_transition_at"`
+	UpdatedAt          time.Time `db:"updated_at"`
 }
 
 type MonitorIncident struct {
