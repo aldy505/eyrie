@@ -9,20 +9,21 @@ import (
 )
 
 type BufferedNtfyAlerter struct {
-	wrapped           NtfyAlerter
-	suppressWindow    time.Duration
-	digestInterval    time.Duration
-	mu                sync.RWMutex
-	states            map[string]*monitorAlertState
-	digestTicker      *time.Ticker
-	digestStop        chan struct{}
-	digestWg          sync.WaitGroup
+	wrapped        NtfyAlerter
+	suppressWindow time.Duration
+	digestInterval time.Duration
+	mu             sync.RWMutex
+	states         map[string]*monitorAlertState
+	digestTicker   *time.Ticker
+	digestStop     chan struct{}
+	digestWg       sync.WaitGroup
 }
 
 type monitorAlertState struct {
-	suppressUntil time.Time
-	degradedSince time.Time
-	degradedBuffer []AlertMessage
+	suppressUntil     time.Time
+	degradedSince     time.Time
+	degradedBuffer    []AlertMessage
+	notifiedUnhealthy bool
 }
 
 func NewBufferedNtfyAlerter(wrapped NtfyAlerter, suppressWindowMinutes, digestIntervalMinutes int) *BufferedNtfyAlerter {
@@ -83,22 +84,30 @@ func (a *BufferedNtfyAlerter) handleDownAlert(ctx context.Context, alert AlertMe
 		return nil
 	}
 
-	return a.wrapped.Send(ctx, alert)
+	if err := a.wrapped.Send(ctx, alert); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	state.notifiedUnhealthy = true
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *BufferedNtfyAlerter) handleDegradedAlert(ctx context.Context, alert AlertMessage) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	state := a.getOrCreateState(alert.MonitorID)
+
 	if a.digestInterval <= 0 {
 		return nil
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if time.Now().Before(a.suppressUntilForLocked(alert.MonitorID)) {
+	if time.Now().Before(state.suppressUntil) {
 		return nil
 	}
 
-	state := a.getOrCreateState(alert.MonitorID)
 	if len(state.degradedBuffer) == 0 {
 		state.degradedSince = alert.OccurredAt
 	}
@@ -109,21 +118,34 @@ func (a *BufferedNtfyAlerter) handleDegradedAlert(ctx context.Context, alert Ale
 func (a *BufferedNtfyAlerter) handleHealthyAlert(ctx context.Context, alert AlertMessage) error {
 	a.mu.Lock()
 	state, exists := a.states[alert.MonitorID]
-	a.mu.Unlock()
-
 	if exists && len(state.degradedBuffer) > 0 {
+		a.mu.Unlock()
 		a.flushDigestForMonitor(ctx, alert.MonitorID)
 		return nil
 	}
 
-	return a.wrapped.Send(ctx, alert)
-}
-
-func (a *BufferedNtfyAlerter) suppressUntilForLocked(monitorID string) time.Time {
-	if state, ok := a.states[monitorID]; ok {
-		return state.suppressUntil
+	if !exists {
+		a.mu.Unlock()
+		return a.wrapped.Send(ctx, alert)
 	}
-	return time.Time{}
+
+	if !state.notifiedUnhealthy {
+		a.mu.Unlock()
+		slog.Debug("ntfy: healthy alert suppressed (no delivered unhealthy notification)",
+			slog.String("monitor_id", alert.MonitorID),
+			slog.String("name", alert.Name))
+		return nil
+	}
+
+	a.mu.Unlock()
+	if err := a.wrapped.Send(ctx, alert); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	state.notifiedUnhealthy = false
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *BufferedNtfyAlerter) getOrCreateState(monitorID string) *monitorAlertState {
@@ -160,6 +182,7 @@ func (a *BufferedNtfyAlerter) flushDigestForMonitor(ctx context.Context, monitor
 	first := state.degradedBuffer[0]
 	first.Reason = digest
 	first.Status = MonitorStatusHealthy
+	bufferLength := len(state.degradedBuffer)
 	state.degradedBuffer = nil
 	a.mu.Unlock()
 
@@ -167,11 +190,16 @@ func (a *BufferedNtfyAlerter) flushDigestForMonitor(ctx context.Context, monitor
 		slog.Error("ntfy: failed to send degraded digest",
 			slog.String("monitor_id", monitorID),
 			slog.String("error", err.Error()))
-	} else {
-		slog.Debug("ntfy: sent degraded digest",
-			slog.String("monitor_id", monitorID),
-			slog.Int("alert_count", len(state.degradedBuffer)))
+		return
 	}
+
+	slog.Debug("ntfy: sent degraded digest",
+		slog.String("monitor_id", monitorID),
+		slog.Int("alert_count", bufferLength))
+
+	a.mu.Lock()
+	state.notifiedUnhealthy = true
+	a.mu.Unlock()
 }
 
 func (a *BufferedNtfyAlerter) buildDigestMessage(monitorID string, state *monitorAlertState) string {

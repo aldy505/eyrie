@@ -26,10 +26,10 @@ func TestBufferedNtfyAlerter_SendsDownImmediately(t *testing.T) {
 	defer alerter.Stop()
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDown,
-		Reason:    "Connection refused",
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
+		Reason:     "Connection refused",
 		OccurredAt: time.Now(),
 	})
 
@@ -57,16 +57,16 @@ func TestBufferedNtfyAlerter_SuppressesRepeatDown(t *testing.T) {
 	defer alerter.Stop()
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDown,
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
 		OccurredAt: time.Now(),
 	})
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDown,
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
 		OccurredAt: time.Now(),
 	})
 
@@ -94,9 +94,9 @@ func TestBufferedNtfyAlerter_SuppressesDegradedWhenDigestDisabled(t *testing.T) 
 	defer alerter.Stop()
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDegraded,
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDegraded,
 		OccurredAt: time.Now(),
 	})
 
@@ -163,16 +163,16 @@ func TestBufferedNtfyAlerter_HealthyDoesNotFlushOtherMonitor(t *testing.T) {
 	defer alerter.Stop()
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDegraded,
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDegraded,
 		OccurredAt: time.Now(),
 	})
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-2",
-		Name:      "Redis",
-		Status:    MonitorStatusHealthy,
+		MonitorID:  "monitor-2",
+		Name:       "Redis",
+		Status:     MonitorStatusHealthy,
 		OccurredAt: time.Now(),
 	})
 
@@ -201,9 +201,9 @@ func TestBufferedNtfyAlerter_DigestIntervalZeroSuppressesDegraded(t *testing.T) 
 
 	for i := 0; i < 5; i++ {
 		alerter.Send(context.Background(), AlertMessage{
-			MonitorID: "monitor-1",
-			Name:      "API Gateway",
-			Status:    MonitorStatusDegraded,
+			MonitorID:  "monitor-1",
+			Name:       "API Gateway",
+			Status:     MonitorStatusDegraded,
 			OccurredAt: time.Now(),
 		})
 	}
@@ -232,26 +232,26 @@ func TestBufferedNtfyAlerter_DownClearsDegradedBuffer(t *testing.T) {
 	defer alerter.Stop()
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDegraded,
-		Reason:    "Latency spike",
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDegraded,
+		Reason:     "Latency spike",
 		OccurredAt: time.Now(),
 	})
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDown,
-		Reason:    "Connection refused",
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
+		Reason:     "Connection refused",
 		OccurredAt: time.Now(),
 	})
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusHealthy,
-		Reason:    "Recovered",
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusHealthy,
+		Reason:     "Recovered",
 		OccurredAt: time.Now(),
 	})
 
@@ -279,9 +279,9 @@ func TestBufferedNtfyAlerter_HealthyAfterHealthyPassesThrough(t *testing.T) {
 	defer alerter.Stop()
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusHealthy,
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusHealthy,
 		OccurredAt: time.Now(),
 	})
 
@@ -291,7 +291,7 @@ func TestBufferedNtfyAlerter_HealthyAfterHealthyPassesThrough(t *testing.T) {
 	}
 	mu.Unlock()
 }
-	func TestBufferedNtfyAlerter_DegradedAfterDownNotSent(t *testing.T) {
+func TestBufferedNtfyAlerter_DegradedAfterDownNotSent(t *testing.T) {
 	var mu sync.Mutex
 	var sent int
 
@@ -308,22 +308,196 @@ func TestBufferedNtfyAlerter_HealthyAfterHealthyPassesThrough(t *testing.T) {
 	defer alerter.Stop()
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDown,
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
 		OccurredAt: time.Now(),
 	})
 
 	alerter.Send(context.Background(), AlertMessage{
-		MonitorID: "monitor-1",
-		Name:      "API Gateway",
-		Status:    MonitorStatusDegraded,
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDegraded,
 		OccurredAt: time.Now(),
 	})
 
 	mu.Lock()
 	if sent != 1 {
 		t.Fatalf("expected 1 (degraded after down suppressed by suppression window), got %d", sent)
+	}
+	mu.Unlock()
+}
+
+func TestBufferedNtfyAlerter_SuppressesHealthyAfterSuppressedDown(t *testing.T) {
+	var mu sync.Mutex
+	var sent int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sent++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	wrapped := NtfyAlerter{topicURL: server.URL}
+	alerter := NewBufferedNtfyAlerter(wrapped, 15, 0)
+	defer alerter.Stop()
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
+		Reason:     "Connection refused",
+		OccurredAt: time.Now(),
+	})
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusHealthy,
+		Reason:     "Recovered",
+		OccurredAt: time.Now(),
+	})
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
+		Reason:     "Connection refused",
+		OccurredAt: time.Now(),
+	})
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusHealthy,
+		Reason:     "Recovered",
+		OccurredAt: time.Now(),
+	})
+
+	mu.Lock()
+	if sent != 2 {
+		t.Fatalf("expected 2 sent alerts (first down and first healthy only), got %d", sent)
+	}
+	mu.Unlock()
+}
+
+func TestBufferedNtfyAlerter_SendsHealthyAfterDeliveredDown(t *testing.T) {
+	var mu sync.Mutex
+	var sent int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sent++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	wrapped := NtfyAlerter{topicURL: server.URL}
+	alerter := NewBufferedNtfyAlerter(wrapped, 15, 0)
+	defer alerter.Stop()
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDown,
+		Reason:     "Connection refused",
+		OccurredAt: time.Now(),
+	})
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusHealthy,
+		Reason:     "Recovered",
+		OccurredAt: time.Now(),
+	})
+
+	mu.Lock()
+	if sent != 2 {
+		t.Fatalf("expected 2 sent alerts (down and recovery healthy), got %d", sent)
+	}
+	mu.Unlock()
+}
+
+func TestBufferedNtfyAlerter_SuppressesHealthyAfterSuppressedDegraded(t *testing.T) {
+	var mu sync.Mutex
+	var sent int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sent++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	wrapped := NtfyAlerter{topicURL: server.URL}
+	alerter := NewBufferedNtfyAlerter(wrapped, 15, 0)
+	defer alerter.Stop()
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDegraded,
+		Reason:     "Latency spike",
+		OccurredAt: time.Now(),
+	})
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusHealthy,
+		Reason:     "Recovered",
+		OccurredAt: time.Now(),
+	})
+
+	mu.Lock()
+	if sent != 0 {
+		t.Fatalf("expected 0 sent alerts (degraded suppressed by digest=0, healthy should not be sent), got %d", sent)
+	}
+	mu.Unlock()
+}
+
+func TestBufferedNtfyAlerter_SendsHealthyAfterDegradedDigest(t *testing.T) {
+	var mu sync.Mutex
+	var sent int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sent++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	wrapped := NtfyAlerter{topicURL: server.URL}
+	alerter := NewBufferedNtfyAlerter(wrapped, 15, 60)
+	defer alerter.Stop()
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusDegraded,
+		Reason:     "Latency spike",
+		OccurredAt: time.Now(),
+	})
+
+	alerter.flushDigest(context.Background())
+
+	alerter.Send(context.Background(), AlertMessage{
+		MonitorID:  "monitor-1",
+		Name:       "API Gateway",
+		Status:     MonitorStatusHealthy,
+		Reason:     "Recovered",
+		OccurredAt: time.Now(),
+	})
+
+	mu.Lock()
+	if sent != 2 {
+		t.Fatalf("expected 2 sent alerts (degraded digest and recovery healthy), got %d", sent)
 	}
 	mu.Unlock()
 }
