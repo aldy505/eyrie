@@ -26,3 +26,4 @@ go.work
 .idea
 frontend/dist/
 .worktree/
+.worktrees/

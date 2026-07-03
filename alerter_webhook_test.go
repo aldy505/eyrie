@@ -61,6 +61,9 @@ func TestBuildWebhookPayload(t *testing.T) {
 		if !strings.Contains(payload.Message, "🟥 API Gateway is down at 2025-01-01 12:30:00") {
 			t.Fatalf("unexpected message %q", payload.Message)
 		}
+		if payload.Text != payload.Message {
+			t.Fatalf("expected text %q to match message %q", payload.Text, payload.Message)
+		}
 		if !strings.Contains(payload.Message, "(affected regions: eu-west-1, us-east-1)") {
 			t.Fatalf("expected affected regions in message, got %q", payload.Message)
 		}
@@ -105,6 +108,9 @@ func TestBuildWebhookPayload(t *testing.T) {
 		if !strings.Contains(payload.Message, "🟩 Auth Service is healthy") {
 			t.Fatalf("unexpected message %q", payload.Message)
 		}
+		if payload.Text != payload.Message {
+			t.Fatalf("expected text %q to match message %q", payload.Text, payload.Message)
+		}
 		if !strings.Contains(payload.Message, "(affected regions: none)") {
 			t.Fatalf("expected none regions in message, got %q", payload.Message)
 		}
@@ -136,6 +142,9 @@ func TestBuildWebhookPayload(t *testing.T) {
 		}
 		if !strings.Contains(payload.Message, "🟨 Billing Worker is degraded") {
 			t.Fatalf("unexpected message %q", payload.Message)
+		}
+		if payload.Text != payload.Message {
+			t.Fatalf("expected text %q to match message %q", payload.Text, payload.Message)
 		}
 		if !strings.Contains(payload.Description, "Affected regions: us-east-1.") {
 			t.Fatalf("unexpected description %q", payload.Description)
@@ -311,6 +320,9 @@ func TestWebhookAlerterSendAddsParityHeaders(t *testing.T) {
 	}
 	if !strings.Contains(decoded.Message, "🟥 API Gateway is down at 2025-01-01 12:30:00") {
 		t.Fatalf("unexpected message %q", decoded.Message)
+	}
+	if decoded.Text != decoded.Message {
+		t.Fatalf("expected text %q to match message %q", decoded.Text, decoded.Message)
 	}
 }
 
