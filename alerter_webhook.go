@@ -28,6 +28,22 @@ type AlertPresentation struct {
 	Tags       []string
 }
 
+type WebhookAlertPayload struct {
+	Message     string                `json:"message"`
+	Title       string                `json:"title"`
+	Description string                `json:"description"`
+	Status      string                `json:"status"`
+	Metadata    WebhookAlertMetadata  `json:"metadata"`
+}
+
+type WebhookAlertMetadata struct {
+	MonitorID       string   `json:"monitor_id"`
+	Status          string   `json:"status"`
+	Name            string   `json:"name"`
+	AffectedRegions []string `json:"affected_regions"`
+	OccurredAt      string   `json:"occurred_at"`
+}
+
 func NewWebhookAlerter(webhookURL, hmacSecret string, customHeaders map[string]string) *WebhookAlerter {
 	return &WebhookAlerter{
 		webhookURL:    webhookURL,
@@ -41,7 +57,8 @@ func (w *WebhookAlerter) Send(ctx context.Context, alert AlertMessage) error {
 	ctx = span.Context()
 	defer span.Finish()
 
-	requestBody, err := json.Marshal(alert)
+	payload := buildWebhookPayload(alert)
+	requestBody, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -202,6 +219,64 @@ func buildAlertPresentation(alert AlertMessage) AlertPresentation {
 	}
 
 	return presentation
+}
+
+func buildWebhookPayload(alert AlertMessage) WebhookAlertPayload {
+	presentation := buildAlertPresentation(alert)
+
+	status := strings.ToLower(alert.Status)
+	if status == "" {
+		status = MonitorStatusHealthy
+	}
+
+	alertState := "firing"
+	if status == MonitorStatusHealthy {
+		alertState = "resolved"
+	}
+
+	occurredAt := alert.OccurredAt
+	if occurredAt.IsZero() {
+		occurredAt = time.Now().UTC()
+	}
+
+	regionsLabel := "none"
+	if len(alert.AffectedRegions) > 0 {
+		regionsLabel = strings.Join(alert.AffectedRegions, ", ")
+	}
+
+	message := fmt.Sprintf("%s %s is %s at %s (affected regions: %s)",
+		presentation.StatusIcon,
+		alert.Name,
+		status,
+		occurredAt.Format(time.DateTime),
+		regionsLabel,
+	)
+	if alert.Reason != "" {
+		message = fmt.Sprintf("%s %s", message, alert.Reason)
+	}
+
+	description := fmt.Sprintf("Monitor %s is currently %s. Affected regions: %s.",
+		alert.Name,
+		status,
+		regionsLabel,
+	)
+	if alert.Reason != "" {
+		description = fmt.Sprintf("%s Additional context: %s", description, alert.Reason)
+	}
+
+	return WebhookAlertPayload{
+		Message:     message,
+		Title:       fmt.Sprintf("%s is %s", alert.Name, status),
+		Description: description,
+		Status:      alertState,
+		Metadata: WebhookAlertMetadata{
+			MonitorID:       alert.MonitorID,
+			Status:          status,
+			Name:            alert.Name,
+			AffectedRegions: alert.AffectedRegions,
+			OccurredAt:      occurredAt.Format(time.RFC3339),
+		},
+	}
 }
 
 func formatProviderAlertMessage(alert AlertMessage) string {

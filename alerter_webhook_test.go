@@ -36,6 +36,134 @@ func TestBuildAlertPresentation(t *testing.T) {
 	}
 }
 
+func TestBuildWebhookPayload(t *testing.T) {
+	occurredAt := time.Date(2025, 1, 1, 12, 30, 0, 0, time.UTC)
+
+	t.Run("down global alert", func(t *testing.T) {
+		alert := AlertMessage{
+			MonitorID:       "monitor-1",
+			Name:            "API Gateway",
+			Status:          MonitorStatusDown,
+			Scope:           MonitorScopeGlobal,
+			Reason:          "Multi-region outage detected",
+			OccurredAt:      occurredAt,
+			AffectedRegions: []string{"eu-west-1", "us-east-1"},
+		}
+
+		payload := buildWebhookPayload(alert)
+
+		if payload.Status != "firing" {
+			t.Fatalf("expected status firing, got %q", payload.Status)
+		}
+		if payload.Title != "API Gateway is down" {
+			t.Fatalf("unexpected title %q", payload.Title)
+		}
+		if !strings.Contains(payload.Message, "🟥 API Gateway is down at 2025-01-01 12:30:00") {
+			t.Fatalf("unexpected message %q", payload.Message)
+		}
+		if !strings.Contains(payload.Message, "(affected regions: eu-west-1, us-east-1)") {
+			t.Fatalf("expected affected regions in message, got %q", payload.Message)
+		}
+		if !strings.Contains(payload.Description, "Affected regions: eu-west-1, us-east-1.") {
+			t.Fatalf("unexpected description %q", payload.Description)
+		}
+		if payload.Metadata.MonitorID != "monitor-1" {
+			t.Fatalf("unexpected metadata monitor_id %q", payload.Metadata.MonitorID)
+		}
+		if payload.Metadata.Status != "down" {
+			t.Fatalf("unexpected metadata status %q", payload.Metadata.Status)
+		}
+		if payload.Metadata.Name != "API Gateway" {
+			t.Fatalf("unexpected metadata name %q", payload.Metadata.Name)
+		}
+		if strings.Join(payload.Metadata.AffectedRegions, ",") != "eu-west-1,us-east-1" {
+			t.Fatalf("unexpected metadata affected_regions %v", payload.Metadata.AffectedRegions)
+		}
+		if payload.Metadata.OccurredAt != "2025-01-01T12:30:00Z" {
+			t.Fatalf("unexpected metadata occurred_at %q", payload.Metadata.OccurredAt)
+		}
+	})
+
+	t.Run("healthy resolved alert", func(t *testing.T) {
+		alert := AlertMessage{
+			MonitorID:       "monitor-2",
+			Name:            "Auth Service",
+			Status:          MonitorStatusHealthy,
+			Scope:           MonitorScopeHealthy,
+			OccurredAt:      occurredAt,
+			AffectedRegions: []string{},
+		}
+
+		payload := buildWebhookPayload(alert)
+
+		if payload.Status != "resolved" {
+			t.Fatalf("expected status resolved, got %q", payload.Status)
+		}
+		if payload.Title != "Auth Service is healthy" {
+			t.Fatalf("unexpected title %q", payload.Title)
+		}
+		if !strings.Contains(payload.Message, "🟩 Auth Service is healthy") {
+			t.Fatalf("unexpected message %q", payload.Message)
+		}
+		if !strings.Contains(payload.Message, "(affected regions: none)") {
+			t.Fatalf("expected none regions in message, got %q", payload.Message)
+		}
+		if payload.Metadata.Status != "healthy" {
+			t.Fatalf("unexpected metadata status %q", payload.Metadata.Status)
+		}
+		if payload.Metadata.OccurredAt != "2025-01-01T12:30:00Z" {
+			t.Fatalf("unexpected metadata occurred_at %q", payload.Metadata.OccurredAt)
+		}
+	})
+
+	t.Run("degraded local alert without reason", func(t *testing.T) {
+		alert := AlertMessage{
+			MonitorID:       "monitor-3",
+			Name:            "Billing Worker",
+			Status:          MonitorStatusDegraded,
+			Scope:           MonitorScopeLocal,
+			OccurredAt:      occurredAt,
+			AffectedRegions: []string{"us-east-1"},
+		}
+
+		payload := buildWebhookPayload(alert)
+
+		if payload.Status != "firing" {
+			t.Fatalf("expected status firing, got %q", payload.Status)
+		}
+		if payload.Title != "Billing Worker is degraded" {
+			t.Fatalf("unexpected title %q", payload.Title)
+		}
+		if !strings.Contains(payload.Message, "🟨 Billing Worker is degraded") {
+			t.Fatalf("unexpected message %q", payload.Message)
+		}
+		if !strings.Contains(payload.Description, "Affected regions: us-east-1.") {
+			t.Fatalf("unexpected description %q", payload.Description)
+		}
+		if strings.Contains(payload.Description, "Additional context:") {
+			t.Fatalf("description should not contain additional context when reason is empty, got %q", payload.Description)
+		}
+	})
+
+	t.Run("zero occurred at falls back to now", func(t *testing.T) {
+		alert := AlertMessage{
+			MonitorID:       "monitor-4",
+			Name:            "Cache Cluster",
+			Status:          MonitorStatusDown,
+			AffectedRegions: []string{"ap-southeast-1"},
+		}
+
+		payload := buildWebhookPayload(alert)
+
+		if payload.Metadata.OccurredAt == "" {
+			t.Fatalf("expected metadata occurred_at to be populated")
+		}
+		if _, err := time.Parse(time.RFC3339, payload.Metadata.OccurredAt); err != nil {
+			t.Fatalf("metadata occurred_at is not RFC3339: %v", err)
+		}
+	})
+}
+
 func TestProviderPayloadBuilders(t *testing.T) {
 	alert := AlertMessage{
 		Name:            "API Gateway",
@@ -168,12 +296,21 @@ func TestWebhookAlerterSendAddsParityHeaders(t *testing.T) {
 		t.Fatalf("unexpected signature header %q", request.headers.Get("X-Signature"))
 	}
 
-	var decoded AlertMessage
+	var decoded WebhookAlertPayload
 	if err := json.Unmarshal(request.body, &decoded); err != nil {
 		t.Fatalf("failed to decode webhook body: %v", err)
 	}
-	if decoded.MonitorID != alert.MonitorID || decoded.Status != alert.Status {
+	if decoded.Metadata.MonitorID != alert.MonitorID || decoded.Metadata.Status != alert.Status {
 		t.Fatalf("unexpected webhook body %+v", decoded)
+	}
+	if decoded.Status != "firing" {
+		t.Fatalf("expected top-level status firing, got %q", decoded.Status)
+	}
+	if decoded.Title != "API Gateway is down" {
+		t.Fatalf("unexpected title %q", decoded.Title)
+	}
+	if !strings.Contains(decoded.Message, "🟥 API Gateway is down at 2025-01-01 12:30:00") {
+		t.Fatalf("unexpected message %q", decoded.Message)
 	}
 }
 
