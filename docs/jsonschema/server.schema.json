@@ -1,0 +1,319 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Eyrie Server Configuration",
+  "description": "Configuration schema for Eyrie server mode",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "server": {
+      "type": "object",
+      "description": "Server configuration",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Host to bind to",
+          "default": "0.0.0.0"
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port to listen on",
+          "default": 8600,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "log_level": {
+          "type": "string",
+          "description": "Logging level",
+          "enum": ["DEBUG", "INFO", "WARN", "ERROR"],
+          "default": "INFO"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Status page metadata",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Status page title",
+          "default": "Status Page"
+        },
+        "show_last_updated": {
+          "type": "boolean",
+          "description": "Show last updated timestamp on status page",
+          "default": true
+        }
+      }
+    },
+    "registered_checkers": {
+      "type": "array",
+      "description": "List of registered checker nodes",
+      "items": {
+        "type": "object",
+        "required": ["region", "api_key"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Optional checker name (defaults to region if not set)"
+          },
+          "region": {
+            "type": "string",
+            "description": "Geographic region identifier"
+          },
+          "api_key": {
+            "type": "string",
+            "description": "API key for checker authentication"
+          }
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "description": "DuckDB database configuration",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to DuckDB database file",
+          "default": "eyrie.db"
+        }
+      }
+    },
+    "task_queue": {
+      "type": "object",
+      "description": "Task queue configuration for workers",
+      "properties": {
+        "processor": {
+          "type": "object",
+          "properties": {
+            "producer_address": {
+              "type": "string",
+              "description": "Processor queue producer address (e.g., mem://processor_tasks, kafka://...)",
+              "default": "mem://processor_tasks"
+            },
+            "consumer_address": {
+              "type": "string",
+              "description": "Processor queue consumer address",
+              "default": "mem://processor_tasks"
+            }
+          }
+        },
+        "ingester": {
+          "type": "object",
+          "properties": {
+            "producer_address": {
+              "type": "string",
+              "description": "Ingester queue producer address",
+              "default": "mem://ingester_tasks"
+            },
+            "consumer_address": {
+              "type": "string",
+              "description": "Ingester queue consumer address",
+              "default": "mem://ingester_tasks"
+            }
+          }
+        },
+        "alerter": {
+          "type": "object",
+          "properties": {
+            "producer_address": {
+              "type": "string",
+              "description": "Alerter queue producer address",
+              "default": "mem://alerter_tasks"
+            },
+            "consumer_address": {
+              "type": "string",
+              "description": "Alerter queue consumer address",
+              "default": "mem://alerter_tasks"
+            }
+          }
+        }
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "description": "Dataset aggregation and threshold settings",
+      "properties": {
+        "retention_days": {
+          "type": "integer",
+          "description": "Number of days to retain historical data",
+          "default": 90,
+          "minimum": 1
+        },
+        "processing_lookback_minutes": {
+          "type": "integer",
+          "description": "Minutes to look back when processing incidents",
+          "default": 10,
+          "minimum": 1
+        },
+        "per_region_failure_threshold_percent": {
+          "type": "number",
+          "description": "Failure percentage threshold per region",
+          "default": 40.0,
+          "minimum": 0,
+          "maximum": 100
+        },
+        "failure_threshold_percent": {
+          "type": "number",
+          "description": "Global failure percentage threshold",
+          "default": 50.0,
+          "minimum": 0,
+          "maximum": 100
+        },
+        "degraded_threshold_minutes": {
+          "type": "integer",
+          "description": "Duration in minutes to mark service as degraded",
+          "default": 10,
+          "minimum": 1
+        },
+        "failure_threshold_minutes": {
+          "type": "integer",
+          "description": "Duration in minutes to mark service as failed",
+          "default": 15,
+          "minimum": 1
+        }
+      }
+    },
+    "alerting": {
+      "type": "object",
+      "description": "Alert delivery configuration",
+      "properties": {
+        "webhook": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "url": {
+              "type": "string",
+              "description": "Webhook URL to send alerts to"
+            },
+            "hmac_secret": {
+              "type": "string",
+              "description": "HMAC secret for webhook signature verification"
+            },
+            "custom_headers": {
+              "type": "object",
+              "description": "Custom HTTP headers to include in webhook requests",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "slack": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "webhook_url": {
+              "type": "string",
+              "description": "Slack webhook URL"
+            }
+          }
+        },
+        "discord": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "webhook_url": {
+              "type": "string",
+              "description": "Discord webhook URL"
+            }
+          }
+        },
+        "teams": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "webhook_url": {
+              "type": "string",
+              "description": "Microsoft Teams webhook URL"
+            }
+          }
+        },
+        "ntfy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "topic_url": {
+              "type": "string",
+              "description": "ntfy.sh topic URL"
+            },
+            "access_token": {
+              "type": "string",
+              "description": "ntfy access token for authentication"
+            },
+            "username": {
+              "type": "string",
+              "description": "ntfy username for basic authentication"
+            },
+            "password": {
+              "type": "string",
+              "description": "ntfy password for basic authentication"
+            },
+            "priority": {
+              "type": "integer",
+              "description": "ntfy priority (0-5)",
+              "default": 3,
+              "minimum": 0,
+              "maximum": 5
+            }
+          }
+        }
+      }
+    },
+    "sentry": {
+      "type": "object",
+      "description": "Sentry error monitoring configuration",
+      "properties": {
+        "dsn": {
+          "type": "string",
+          "description": "Sentry DSN for error reporting"
+        },
+        "error_sample_rate": {
+          "type": "number",
+          "description": "Sample rate for error events (0.0-1.0)",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1
+        },
+        "traces_sample_rate": {
+          "type": "number",
+          "description": "Sample rate for tracing events (0.0-1.0)",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1
+        },
+        "profiling_sample_rate": {
+          "type": "number",
+          "description": "Sample rate for profiling events (0.0-1.0)",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1
+        },
+        "debug": {
+          "type": "boolean",
+          "description": "Enable Sentry debug logging",
+          "default": false
+        },
+        "trace_outgoing_requests": {
+          "type": "boolean",
+          "description": "Enable tracing of outgoing HTTP requests",
+          "default": false
+        }
+      }
+    }
+  }
+}

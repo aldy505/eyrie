@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Eyrie Checker Configuration",
+  "description": "Configuration schema for Eyrie checker mode",
+  "type": "object",
+  "required": ["upstream_url", "region", "api_key"],
+  "properties": {
+    "upstream_url": {
+      "type": "string",
+      "description": "URL of the Eyrie server to register with and submit results to",
+      "examples": ["http://127.0.0.1:8600", "https://status.example.com"]
+    },
+    "name": {
+      "type": "string",
+      "description": "Optional checker name. Defaults to region if not set. Used for checker targeting via checker_names in monitor config"
+    },
+    "region": {
+      "type": "string",
+      "description": "Geographic region identifier. Used as fallback checker identification if name is not set",
+      "examples": ["us-east-1", "eu-west-1", "ap-southeast-1"]
+    },
+    "api_key": {
+      "type": "string",
+      "description": "API key for authentication with the server"
+    },
+    "sentry": {
+      "type": "object",
+      "description": "Sentry error monitoring and tracing configuration",
+      "properties": {
+        "dsn": {
+          "type": "string",
+          "description": "Sentry DSN for error reporting and tracing"
+        },
+        "error_sample_rate": {
+          "type": "number",
+          "description": "Sample rate for error events (0.0-1.0)",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1
+        },
+        "traces_sample_rate": {
+          "type": "number",
+          "description": "Sample rate for tracing events (0.0-1.0)",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1
+        },
+        "profiling_sample_rate": {
+          "type": "number",
+          "description": "Sample rate for continuous profiling (0.0-1.0)",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1
+        },
+        "debug": {
+          "type": "boolean",
+          "description": "Enable Sentry debug logging",
+          "default": false
+        },
+        "trace_outgoing_requests": {
+          "type": "boolean",
+          "description": "Enable tracing of outgoing HTTP requests to the server",
+          "default": false
+        }
+      }
+    }
+  }
+}

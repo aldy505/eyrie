@@ -51,8 +51,9 @@
 
 ### Checker Config (`CheckerConfig` in `config_checker.go`)
 - YAML + envconfig with explicit env variables:
-  - `UPSTREAM_URL`, `REGION`, `API_KEY`
-  - `SENTRY_*` env vars for tracing and error reporting
+  - `UPSTREAM_URL`, `CHECKER_NAME`, `REGION`, `API_KEY`
+  - `SENTRY_DSN`, `SENTRY_ERROR_SAMPLE_RATE`, `SENTRY_TRACES_SAMPLE_RATE`, `SENTRY_PROFILING_SAMPLE_RATE`, `SENTRY_DEBUG`, `SENTRY_TRACE_OUTGOING_REQUESTS`
+  - Checker identifies itself by `name` if set, otherwise falls back to `region`
 
 ### Monitor Config (`MonitorConfig` in `config_monitor.go`)
 - YAML file containing:
