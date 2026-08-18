@@ -510,16 +510,16 @@ func (s *Server) UptimeDataHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandlerResponse, error) {
-	monitorMetadata, err := s.fetchValidMonitorIds(ctx)
-	if err != nil {
-		return UptimeDataHandlerResponse{}, err
+	configuredMonitorByID := make(map[string]Monitor, len(s.monitorConfig.Monitors))
+	for _, monitor := range s.monitorConfig.Monitors {
+		configuredMonitorByID[monitor.ID] = monitor
 	}
 
 	wg := sync.WaitGroup{}
 	mutex := sync.Mutex{}
-	m := make(map[string]UptimeDataHistorical)
+	m := make(map[string]UptimeDataHistorical, len(s.monitorConfig.Monitors))
 
-	for _, monitor := range monitorMetadata {
+	for _, monitor := range s.monitorConfig.Monitors {
 		wg.Go(func() {
 			historical, historicalErr := s.fetchFromRawMonitorHistorical(ctx, monitor.ID)
 			if historicalErr != nil {
@@ -527,7 +527,11 @@ func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandler
 					hub.CaptureException(fmt.Errorf("fetching monitor historical for monitor %s: %w", monitor.ID, historicalErr))
 				}
 				slog.ErrorContext(ctx, "fetching monitor historical", slog.String("monitor_id", monitor.ID), slog.String("error", historicalErr.Error()))
-				return
+				historical = UptimeDataHistorical{
+					DailyDowntimes: make(map[int]struct {
+						DurationMinutes int `json:"duration_minutes"`
+					}),
+				}
 			}
 
 			mutex.Lock()
@@ -544,28 +548,25 @@ func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandler
 	}
 	var uptimeDataHandlerMonitorGroup []UptimeDataHandlerMonitorGroup
 
-	monitorIndexByID := make(map[string]int, len(monitorMetadata))
-	for i, monitor := range monitorMetadata {
-		monitorIndexByID[monitor.ID] = i
-	}
-
 	for _, group := range s.monitorConfig.Groups {
-		var groupMonitors []UptimeDataHandlerSingleMonitor
+		groupMonitors := make([]UptimeDataHandlerSingleMonitor, 0, len(group.MonitorIDs))
 		for _, monitorID := range group.MonitorIDs {
-			if idx, ok := monitorIndexByID[monitorID]; ok {
-				monitor := monitorMetadata[idx]
-				if historical, exists := m[monitor.ID]; exists {
-					groupMonitors = append(groupMonitors, UptimeDataHandlerSingleMonitor{
-						ID:             monitor.ID,
-						Name:           monitor.Name,
-						Description:    monitor.Description,
-						ResponseTimeMs: historical.LatencyMs,
-						Age:            historical.MonitorAge,
-						Downtimes:      historical.DailyDowntimes,
-						TLS:            historical.TLS,
-					})
-				}
+			monitor, ok := configuredMonitorByID[monitorID]
+			if !ok {
+				slog.WarnContext(ctx, "group references unconfigured monitor, skipping", slog.String("group_id", group.ID), slog.String("monitor_id", monitorID))
+				continue
 			}
+
+			historical := m[monitor.ID]
+			groupMonitors = append(groupMonitors, UptimeDataHandlerSingleMonitor{
+				ID:             monitor.ID,
+				Name:           monitor.Name,
+				Description:    monitor.Description,
+				ResponseTimeMs: historical.LatencyMs,
+				Age:            historical.MonitorAge,
+				Downtimes:      historical.DailyDowntimes,
+				TLS:            historical.TLS,
+			})
 		}
 
 		uptimeDataHandlerMonitorGroup = append(uptimeDataHandlerMonitorGroup, UptimeDataHandlerMonitorGroup{
@@ -584,11 +585,15 @@ func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandler
 		}
 	}
 
-	var singleMonitors []UptimeDataHandlerSingleMonitor
-	for _, monitor := range monitorMetadata {
+	for _, monitor := range s.monitorConfig.Monitors {
 		if _, inGroup := monitorsInGroups[monitor.ID]; !inGroup {
-			if historical, exists := m[monitor.ID]; exists {
-				singleMonitors = append(singleMonitors, UptimeDataHandlerSingleMonitor{
+			historical := m[monitor.ID]
+			uptimeDataHandlerMonitorGroup = append(uptimeDataHandlerMonitorGroup, UptimeDataHandlerMonitorGroup{
+				Type:        UptimeDataHandlerMonitorTypeSingle,
+				ID:          monitor.ID,
+				Name:        monitor.Name,
+				Description: monitor.Description,
+				Monitors: []UptimeDataHandlerSingleMonitor{{
 					ID:             monitor.ID,
 					Name:           monitor.Name,
 					Description:    monitor.Description,
@@ -596,19 +601,9 @@ func (s *Server) buildUptimeDataResponse(ctx context.Context) (UptimeDataHandler
 					Age:            historical.MonitorAge,
 					Downtimes:      historical.DailyDowntimes,
 					TLS:            historical.TLS,
-				})
-			}
+				}},
+			})
 		}
-	}
-
-	for _, monitor := range singleMonitors {
-		uptimeDataHandlerMonitorGroup = append(uptimeDataHandlerMonitorGroup, UptimeDataHandlerMonitorGroup{
-			Type:        UptimeDataHandlerMonitorTypeSingle,
-			ID:          monitor.ID,
-			Name:        monitor.Name,
-			Description: monitor.Description,
-			Monitors:    []UptimeDataHandlerSingleMonitor{monitor},
-		})
 	}
 
 	slices.SortStableFunc(uptimeDataHandlerMonitorGroup, func(a UptimeDataHandlerMonitorGroup, b UptimeDataHandlerMonitorGroup) int {
@@ -948,6 +943,10 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 			return UptimeDataHistorical{}, fmt.Errorf("scanning monitor historical: %w", err)
 		}
 		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
+	}
+
+	if len(monitorHistoricals) == 0 {
+		return UptimeDataHistorical{}, fmt.Errorf("no raw historical data for monitor %s", monitorId)
 	}
 
 	// Find monitor config for this monitor
