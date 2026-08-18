@@ -1125,6 +1125,144 @@ func TestServer_FetchFromRawMonitorHistoricalFallback(t *testing.T) {
 	}
 }
 
+func TestServer_UptimeDataHandler_IncludesConfiguredMonitorsWithNoData(t *testing.T) {
+	hasDataMonitorID := "has-data"
+	noDataMonitorID := "no-data"
+	groupID := "test-group"
+	testDate := time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		for _, monitorID := range [...]string{hasDataMonitorID, noDataMonitorID} {
+			if _, err := conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID); err != nil {
+				t.Fatalf("failed to clean up monitor_historical table: %v", err)
+			}
+		}
+	})
+
+	monitorConfig := MonitorConfig{
+		Monitors: []Monitor{
+			{
+				ID:                  hasDataMonitorID,
+				Name:                "Has Data Monitor",
+				Description:         null.StringFrom("monitor with historical rows"),
+				ExpectedStatusCodes: []int{200},
+			},
+			{
+				ID:                  noDataMonitorID,
+				Name:                "No Data Monitor",
+				Description:         null.StringFrom("monitor without historical rows"),
+				ExpectedStatusCodes: []int{200},
+			},
+		},
+		Groups: []Group{
+			{
+				ID:          groupID,
+				Name:        "Test Group",
+				Description: null.StringFrom("group containing both monitors"),
+				MonitorIDs:  []string{hasDataMonitorID, noDataMonitorID},
+			},
+		},
+	}
+
+	ingesterWorker := &IngesterWorker{
+		db:            db,
+		subscriber:    nil,
+		monitorConfig: monitorConfig,
+		shutdown:      make(chan struct{}),
+	}
+
+	for i := range 5 {
+		submission := CheckerSubmissionRequest{
+			MonitorID:  hasDataMonitorID,
+			LatencyMs:  int64(100),
+			StatusCode: 200,
+			Timestamp:  testDate.Add(time.Minute * time.Duration(i)),
+			Timings:    CheckerTraceTimings{},
+		}
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("failed to ingest monitor historical for %s: %v", hasDataMonitorID, err)
+		}
+	}
+
+	server := &Server{
+		db:            db,
+		serverConfig:  ServerConfig{},
+		monitorConfig: monitorConfig,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/uptime-data", nil)
+	w := httptest.NewRecorder()
+
+	server.UptimeDataHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status code %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var response UptimeDataHandlerResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	for _, entry := range response.Monitors {
+		if entry.Monitors == nil {
+			t.Errorf("expected non-nil monitors array for %s entry %q, got nil", entry.Type, entry.ID)
+		}
+	}
+
+	var group *UptimeDataHandlerMonitorGroup
+	for i := range response.Monitors {
+		if response.Monitors[i].ID == groupID {
+			group = &response.Monitors[i]
+			break
+		}
+	}
+	if group == nil {
+		t.Fatalf("expected group %q in response, got %d entries", groupID, len(response.Monitors))
+	}
+
+	if len(group.Monitors) != 2 {
+		t.Fatalf("expected group %q to contain 2 monitors, got %d", groupID, len(group.Monitors))
+	}
+
+	byID := make(map[string]UptimeDataHandlerSingleMonitor, len(group.Monitors))
+	for _, monitor := range group.Monitors {
+		byID[monitor.ID] = monitor
+	}
+
+	hasDataMonitor, ok := byID[hasDataMonitorID]
+	if !ok {
+		t.Fatalf("expected monitor %q in group %q", hasDataMonitorID, groupID)
+	}
+	if hasDataMonitor.ResponseTimeMs != 100 {
+		t.Errorf("expected has-data monitor response time 100ms, got %d", hasDataMonitor.ResponseTimeMs)
+	}
+
+	noDataMonitor, ok := byID[noDataMonitorID]
+	if !ok {
+		t.Fatalf("expected monitor %q in group %q", noDataMonitorID, groupID)
+	}
+	if noDataMonitor.Age != 0 {
+		t.Errorf("expected no-data monitor age 0, got %d", noDataMonitor.Age)
+	}
+	if noDataMonitor.ResponseTimeMs != 0 {
+		t.Errorf("expected no-data monitor response time 0, got %d", noDataMonitor.ResponseTimeMs)
+	}
+	if noDataMonitor.Downtimes == nil {
+		t.Error("expected no-data monitor downtimes to be a non-nil map")
+	}
+	if len(noDataMonitor.Downtimes) != 0 {
+		t.Errorf("expected no-data monitor downtimes to be empty, got %d entries", len(noDataMonitor.Downtimes))
+	}
+}
+
 func TestServer_UptimeDataByRegionHandler(t *testing.T) {
 	monitorID := "test-region-monitor"
 	testDate := time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC)
