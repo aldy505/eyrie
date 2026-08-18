@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -22,8 +23,9 @@ type CleanupWorker struct {
 	datasetConfig DatasetConfig
 	interval      time.Duration
 	stopCh        chan struct{}
+	doneCh        chan struct{}
 	stopOnce      sync.Once
-	wg            sync.WaitGroup
+	started       atomic.Bool
 }
 
 func NewCleanupWorker(db *sql.DB, datasetConfig DatasetConfig) *CleanupWorker {
@@ -32,20 +34,23 @@ func NewCleanupWorker(db *sql.DB, datasetConfig DatasetConfig) *CleanupWorker {
 		datasetConfig: datasetConfig,
 		interval:      time.Duration(datasetConfig.CleanupIntervalMinutes) * time.Minute,
 		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
 	}
 }
 
 // Start runs the cleanup loop until Stop is called: one cleanup pass
 // immediately on startup, then one every configured interval. It is a blocking
 // call matching the other workers; run it in its own goroutine. A context
-// derived from Stop is cancelled so an in-flight pass stops early.
+// derived from Stop is cancelled so an in-flight pass stops early. Calls after
+// the first return nil without starting another loop.
 func (w *CleanupWorker) Start() error {
 	if w.interval <= 0 {
 		return fmt.Errorf("cleanup worker interval must be greater than 0")
 	}
-
-	w.wg.Add(1)
-	defer w.wg.Done()
+	if !w.started.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer close(w.doneCh)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -76,12 +81,15 @@ func (w *CleanupWorker) Start() error {
 }
 
 // Stop signals the worker to stop, waits for the cleanup loop to exit, and
-// returns promptly. It is safe to call more than once.
+// returns promptly. It is safe to call more than once, and on a worker that
+// was never started.
 func (w *CleanupWorker) Stop() error {
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
 	})
-	w.wg.Wait()
+	if w.started.Load() {
+		<-w.doneCh
+	}
 	return nil
 }
 

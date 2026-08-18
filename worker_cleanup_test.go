@@ -202,12 +202,8 @@ func TestCleanupWorker_NoExpiredRowsNoDeletion(t *testing.T) {
 }
 
 func TestCleanupWorker_StopReturnsPromptly(t *testing.T) {
-	worker := &CleanupWorker{
-		db:            db,
-		datasetConfig: DatasetConfig{RetentionDays: 90, CleanupIntervalMinutes: 60, CleanupBatchSize: 1000},
-		interval:      10 * time.Millisecond,
-		stopCh:        make(chan struct{}),
-	}
+	worker := NewCleanupWorker(db, DatasetConfig{RetentionDays: 90, CleanupIntervalMinutes: 60, CleanupBatchSize: 1000})
+	worker.interval = 10 * time.Millisecond
 
 	started := make(chan error, 1)
 	go func() {
