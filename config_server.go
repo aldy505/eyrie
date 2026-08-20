@@ -8,6 +8,8 @@ import (
 
 type DatasetConfig struct {
 	RetentionDays                       int     `yaml:"retention_days" default:"90"`
+	CleanupIntervalMinutes              int     `yaml:"cleanup_interval_minutes" default:"60"`
+	CleanupBatchSize                    int     `yaml:"cleanup_batch_size" default:"100000"`
 	ProcessingLookbackMinutes           int     `yaml:"processing_lookback_minutes" default:"10"`
 	PerRegionFailureThresholdPercent    float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
 	FailureThresholdPercent             float64 `yaml:"failure_threshold_percent" default:"50.0"`
@@ -186,6 +188,13 @@ func (c ServerConfig) Validate() error {
 		if err := validateAlertName(seenAlertNames, "alerting.ntfy", idx, alert.Name); err != nil {
 			return err
 		}
+	}
+
+	if c.Dataset.CleanupIntervalMinutes <= 0 {
+		return fmt.Errorf("dataset.cleanup_interval_minutes must be greater than 0")
+	}
+	if c.Dataset.CleanupBatchSize <= 0 {
+		return fmt.Errorf("dataset.cleanup_batch_size must be greater than 0")
 	}
 
 	return nil

@@ -148,6 +148,7 @@ func main() {
 		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber, monitorConfig, serverConfig.Dataset)
 		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig, serverConfig.Dataset)
 		alerterWorker := NewAlerterWorker(alerterSubscriber, BuildAlerters(serverConfig))
+		cleanupWorker := NewCleanupWorker(db, serverConfig.Dataset)
 
 		srv, err := NewServer(ServerOptions{
 			Database:          db,
@@ -189,6 +190,10 @@ func main() {
 
 			if err := ingesterWorker.Stop(); err != nil {
 				slog.Error("failed to stop ingester worker", slog.String("error", err.Error()))
+			}
+
+			if err := cleanupWorker.Stop(); err != nil {
+				slog.Error("failed to stop cleanup worker", slog.String("error", err.Error()))
 			}
 
 			if err := alerterProducer.Shutdown(shutdownCtx); err != nil {
@@ -251,6 +256,15 @@ func main() {
 				os.Exit(1)
 			}
 			slog.Info("shutting down alerter worker")
+		}()
+
+		go func() {
+			slog.Info("starting cleanup worker")
+			if err := cleanupWorker.Start(); err != nil {
+				slog.Error("cleanup worker error", slog.String("error", err.Error()))
+				os.Exit(1)
+			}
+			slog.Info("shutting down cleanup worker")
 		}()
 
 		slog.Info("starting server", "host", serverConfig.Server.Host, "port", serverConfig.Server.Port)

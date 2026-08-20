@@ -42,6 +42,8 @@ task_queue:
 
 dataset:
   retention_days: 90
+  cleanup_interval_minutes: 60
+  cleanup_batch_size: 100000
   processing_lookback_minutes: 10
   per_region_failure_threshold_percent: 40
   failure_threshold_percent: 50
