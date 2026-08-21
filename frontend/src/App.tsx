@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ClassicStatusList } from "@/components/status/classic-status-list";
-import { DashboardHeader } from "@/components/status/dashboard-header";
+import { MidnightDesign } from "@/components/designs/midnight/midnight-design";
+import { isValidDesign, type FrontendDesign } from "@/lib/design-config";
 import {
   BASE_URL,
-  getSummaryStats,
   incidentsSchema,
   metadataSchema,
   normalizeUptimeData,
@@ -37,6 +36,30 @@ function waitFor(ms: number) {
   });
 }
 
+// --- Stub designs (replaced in later branches) ---
+
+function NewsroomDesignStub() {
+  return (
+    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--eyrie-bg-primary)", color: "var(--eyrie-text-primary)" }}>
+      <div className="text-center">
+        <h1 className="text-2xl font-bold">Newsroom Design</h1>
+        <p className="mt-2" style={{ color: "var(--eyrie-text-secondary)" }}>Coming soon...</p>
+      </div>
+    </div>
+  );
+}
+
+function HealthMapDesignStub() {
+  return (
+    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--eyrie-bg-primary)", color: "var(--eyrie-text-primary)" }}>
+      <div className="text-center">
+        <h1 className="text-2xl font-bold">Health Map Design</h1>
+        <p className="mt-2" style={{ color: "var(--eyrie-text-secondary)" }}>Coming soon...</p>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [data, setData] = useState<UptimeData | null>(null);
   const [metadata, setMetadata] = useState<Metadata | null>(null);
@@ -44,7 +67,6 @@ function App() {
   const [regionMap, setRegionMap] = useState<Record<string, RegionData["monitors"]>>({});
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-
   function loadData() {
     setIsRefreshing(true);
     setError(null);
@@ -111,39 +133,55 @@ function App() {
     return map;
   }, [incidents]);
 
-  const stats = useMemo(() => getSummaryStats(incidents), [incidents]);
-
-  return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.14),_transparent_24%),linear-gradient(180deg,#020617_0%,#08111d_48%,#020617_100%)] text-white">
-      <DashboardHeader
-        metadata={metadata}
-        stats={stats}
-        isRefreshing={isRefreshing}
-        lastUpdated={data?.last_updated ?? null}
-        onRefresh={loadData}
-      />
-
-      <main className="px-6 py-8 sm:px-8 xl:px-10">
-        {error ? (
+  // Error state
+  if (error) {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.14),_transparent_24%),linear-gradient(180deg,#020617_0%,#08111d_48%,#020617_100%)] text-white">
+        <main className="px-6 py-8 sm:px-8 xl:px-10">
           <div className="rounded-[28px] border border-rose-400/20 bg-rose-500/10 p-8">
             <h2 className="text-2xl font-semibold text-white">Unable to load status data</h2>
             <p className="mt-3 text-slate-200">{error}</p>
           </div>
-        ) : data && metadata ? (
-          <ClassicStatusList
-            monitors={data.monitors}
-            metadata={metadata}
-            incidents={incidentById}
-            regionMap={regionMap}
-          />
-        ) : (
+        </main>
+      </div>
+    );
+  }
+
+  // Loading state
+  if (!data || !metadata) {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.14),_transparent_24%),linear-gradient(180deg,#020617_0%,#08111d_48%,#020617_100%)] text-white">
+        <main className="px-6 py-8 sm:px-8 xl:px-10">
           <div className="rounded-[28px] border border-white/10 bg-[#0d1117]/80 p-8 text-slate-300">
             Loading monitor data...
           </div>
-        )}
-      </main>
-    </div>
-  );
+        </main>
+      </div>
+    );
+  }
+
+  const design: FrontendDesign = isValidDesign(metadata.frontend_design)
+    ? metadata.frontend_design
+    : "midnight";
+
+  const designProps = {
+    data,
+    metadata,
+    incidents: incidentById,
+    regionMap,
+    isRefreshing,
+    onRefresh: loadData,
+  };
+
+  switch (design) {
+    case "newsroom":
+      return <NewsroomDesignStub />;
+    case "healthmap":
+      return <HealthMapDesignStub />;
+    case "midnight":
+    default:
+      return <MidnightDesign {...designProps} />;
+  }
 }
 
 export default App;

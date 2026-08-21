@@ -1,0 +1,25 @@
+:root[data-theme="dark"] {
+  --eyrie-bg-primary: #0F1419;
+  --eyrie-bg-secondary: #1A1F2E;
+  --eyrie-text-primary: #E8EAED;
+  --eyrie-text-secondary: #8B92A1;
+  --eyrie-status-healthy: #4ADE80;
+  --eyrie-status-degraded: #FBBF24;
+  --eyrie-status-down: #EF4444;
+  --eyrie-accent: #06B6D4;
+  --eyrie-divider: #3A4556;
+  --eyrie-tier-label: #A0AEC0;
+}
+
+:root[data-theme="light"] {
+  --eyrie-bg-primary: #FAFBFC;
+  --eyrie-bg-secondary: #FFFFFF;
+  --eyrie-text-primary: #0F1419;
+  --eyrie-text-secondary: #6B7280;
+  --eyrie-status-healthy: #059669;
+  --eyrie-status-degraded: #D97706;
+  --eyrie-status-down: #DC2626;
+  --eyrie-accent: #0891B2;
+  --eyrie-divider: #D1D5DB;
+  --eyrie-tier-label: #6B7280;
+}
