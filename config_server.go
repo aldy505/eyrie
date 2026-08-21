@@ -200,9 +200,9 @@ func (c ServerConfig) Validate() error {
 
 	design := strings.ToLower(strings.TrimSpace(c.Metadata.FrontendDesign))
 	switch design {
-	case "", "midnight", "dithered", "newsroom", "healthmap", "neobrutalism", "hearth":
+	case "", "midnight", "dithered", "newsroom", "neobrutalism", "hearth":
 	default:
-		return fmt.Errorf("metadata.frontend_design must be midnight, dithered, newsroom, healthmap, neobrutalism, or hearth")
+		return fmt.Errorf("metadata.frontend_design must be midnight, dithered, newsroom, neobrutalism, or hearth")
 	}
 
 	return nil
