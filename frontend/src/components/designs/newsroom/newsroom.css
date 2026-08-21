@@ -2,13 +2,16 @@
 
 @import url("https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&display=swap");
 
+.newsroom-shell {
+  min-height: 100vh;
+  background: var(--eyrie-bg-primary);
+}
+
 .newsroom-container {
   max-width: 800px;
   margin: 0 auto;
   padding: 24px 16px;
-  background: var(--eyrie-bg-primary);
   color: var(--eyrie-text-primary);
-  min-height: 100vh;
 }
 
 @media (min-width: 1024px) {
@@ -197,6 +200,25 @@
   font-size: 12px;
   color: var(--eyrie-text-secondary);
   margin-top: 12px;
+}
+
+/* Monitor Subheadings */
+.newsroom-monitor-block {
+  margin-top: 16px;
+}
+
+.newsroom-monitor-block + .newsroom-monitor-block {
+  margin-top: 20px;
+}
+
+.newsroom-monitor-name {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--eyrie-text-secondary);
+  margin: 0 0 6px 0;
 }
 
 /* Empty State */
