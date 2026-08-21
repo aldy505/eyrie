@@ -1415,6 +1415,7 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 type ConfigHandlerResponse struct {
 	Title                               string `json:"title"`
 	ShowLastUpdated                     bool   `json:"show_last_updated"`
+	FrontendDesign                      string `json:"frontend_design"`
 	RetentionDays                       int    `json:"retention_days"`
 	DegradedThresholdMinutes            int    `json:"degraded_threshold_minutes"`
 	DegradedThresholdConsecutiveBuckets int    `json:"degraded_threshold_consecutive_buckets"`
@@ -1432,6 +1433,7 @@ func (s *Server) buildConfigResponse() ConfigHandlerResponse {
 	return ConfigHandlerResponse{
 		Title:                               s.serverConfig.Metadata.Title,
 		ShowLastUpdated:                     s.serverConfig.Metadata.ShowLastUpdated,
+		FrontendDesign:                      s.serverConfig.Metadata.FrontendDesign,
 		RetentionDays:                       s.serverConfig.Dataset.RetentionDays,
 		DegradedThresholdMinutes:            s.serverConfig.Dataset.DegradedThresholdMinutes,
 		DegradedThresholdConsecutiveBuckets: s.serverConfig.Dataset.DegradedThresholdConsecutiveBuckets,

@@ -79,6 +79,7 @@ type ServerConfig struct {
 	Metadata struct {
 		Title           string `yaml:"title" default:"Status Page"`
 		ShowLastUpdated bool   `yaml:"show_last_updated" default:"true"`
+		FrontendDesign  string `yaml:"frontend_design" default:"midnight" envconfig:"EYRIE_FRONTEND_DESIGN"`
 	} `yaml:"metadata"`
 	RegisteredCheckers []RegisteredChecker `yaml:"registered_checkers"`
 	Database           struct {
@@ -195,6 +196,13 @@ func (c ServerConfig) Validate() error {
 	}
 	if c.Dataset.CleanupBatchSize <= 0 {
 		return fmt.Errorf("dataset.cleanup_batch_size must be greater than 0")
+	}
+
+	design := strings.ToLower(strings.TrimSpace(c.Metadata.FrontendDesign))
+	switch design {
+	case "", "midnight", "newsroom", "healthmap":
+	default:
+		return fmt.Errorf("metadata.frontend_design must be midnight, newsroom, or healthmap")
 	}
 
 	return nil
