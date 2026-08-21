@@ -1,8 +1,7 @@
-import { Activity, Radar, RefreshCw } from "lucide-react";
+import { Radar, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAutoRefresh } from "@/hooks/use-auto-refresh";
 import type {
-  DashboardLayoutMode,
   Metadata,
   SummaryStats,
 } from "@/lib/status-dashboard";
@@ -11,11 +10,9 @@ import { cn } from "@/lib/utils";
 type DashboardHeaderProps = {
   metadata: Metadata | null;
   stats: SummaryStats;
-  layoutMode: DashboardLayoutMode;
   isRefreshing: boolean;
   lastUpdated: Date | null;
   onRefresh: () => void;
-  onToggleLayout: () => void;
 };
 
 const statItems: Array<{
@@ -32,17 +29,11 @@ const statItems: Array<{
 export function DashboardHeader({
   metadata,
   stats,
-  layoutMode,
   isRefreshing,
   lastUpdated,
   onRefresh,
-  onToggleLayout,
 }: DashboardHeaderProps) {
   const { isAutoRefreshEnabled, handleRefreshClick, toggleAutoRefresh } = useAutoRefresh(onRefresh, isRefreshing);
-  const subtitle =
-    layoutMode === "grid"
-      ? "Dense pulse view for large monitor fleets."
-      : "Detailed grouped view for monitor drilldowns.";
 
   return (
     <header className="border-b border-white/10 bg-black/15 backdrop-blur">
@@ -68,26 +59,11 @@ export function DashboardHeader({
           <div className="space-y-3">
             <div>
               <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">Eyrie</h1>
-              <p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-[15px]">{subtitle}</p>
+              <p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-[15px]">Detailed grouped view for monitor drilldowns.</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 self-start">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={onToggleLayout}
-              aria-label={layoutMode === "grid" ? "Switch to classic layout" : "Switch to pulse grid"}
-              aria-pressed={layoutMode === "grid"}
-              title={layoutMode === "grid" ? "Switch to classic layout" : "Switch to pulse grid"}
-              className={cn(
-                "rounded-full border border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.08] hover:text-white",
-                layoutMode === "grid" && "border-emerald-400/30 bg-emerald-500/10 text-emerald-200",
-              )}
-            >
-              <Activity className={cn("h-4 w-4", layoutMode === "grid" && "animate-pulse")} />
-            </Button>
             <Button
               type="button"
               variant="ghost"

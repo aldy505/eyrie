@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ClassicStatusList } from "@/components/status/classic-status-list";
 import { DashboardHeader } from "@/components/status/dashboard-header";
-import { DenseStatusGrid } from "@/components/status/dense-status-grid";
-import { useDashboardLayout } from "@/hooks/use-dashboard-layout";
 import {
   BASE_URL,
   getSummaryStats,
@@ -46,7 +44,6 @@ function App() {
   const [regionMap, setRegionMap] = useState<Record<string, RegionData["monitors"]>>({});
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const { layoutMode, toggleLayout } = useDashboardLayout("classic");
 
   function loadData() {
     setIsRefreshing(true);
@@ -121,11 +118,9 @@ function App() {
       <DashboardHeader
         metadata={metadata}
         stats={stats}
-        layoutMode={layoutMode}
         isRefreshing={isRefreshing}
         lastUpdated={data?.last_updated ?? null}
         onRefresh={loadData}
-        onToggleLayout={toggleLayout}
       />
 
       <main className="px-6 py-8 sm:px-8 xl:px-10">
@@ -135,21 +130,12 @@ function App() {
             <p className="mt-3 text-slate-200">{error}</p>
           </div>
         ) : data && metadata ? (
-          layoutMode === "grid" ? (
-            <DenseStatusGrid
-              monitors={data.monitors}
-              metadata={metadata}
-              incidents={incidentById}
-              regionMap={regionMap}
-            />
-          ) : (
-            <ClassicStatusList
-              monitors={data.monitors}
-              metadata={metadata}
-              incidents={incidentById}
-              regionMap={regionMap}
-            />
-          )
+          <ClassicStatusList
+            monitors={data.monitors}
+            metadata={metadata}
+            incidents={incidentById}
+            regionMap={regionMap}
+          />
         ) : (
           <div className="rounded-[28px] border border-white/10 bg-[#0d1117]/80 p-8 text-slate-300">
             Loading monitor data...
