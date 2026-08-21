@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { MidnightDesign } from "@/components/designs/midnight/midnight-design";
 import { NewsroomDesign } from "@/components/designs/newsroom/newsroom-design";
+import { HealthmapDesign } from "@/components/designs/healthmap/healthmap-design";
 import { isValidDesign, type FrontendDesign } from "@/lib/design-config";
 import {
   BASE_URL,
@@ -35,19 +36,6 @@ function waitFor(ms: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, ms);
   });
-}
-
-// --- Stub design (replaced in later branch) ---
-
-function HealthMapDesignStub() {
-  return (
-    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--eyrie-bg-primary)", color: "var(--eyrie-text-primary)" }}>
-      <div className="text-center">
-        <h1 className="text-2xl font-bold">Health Map Design</h1>
-        <p className="mt-2" style={{ color: "var(--eyrie-text-secondary)" }}>Coming soon...</p>
-      </div>
-    </div>
-  );
 }
 
 function App() {
@@ -167,7 +155,7 @@ function App() {
     case "newsroom":
       return <NewsroomDesign {...designProps} />;
     case "healthmap":
-      return <HealthMapDesignStub />;
+      return <HealthmapDesign {...designProps} />;
     case "midnight":
     default:
       return <MidnightDesign {...designProps} />;
