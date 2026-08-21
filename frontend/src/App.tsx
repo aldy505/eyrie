@@ -3,6 +3,7 @@ import { MidnightDesign } from "@/components/designs/midnight/midnight-design";
 import { NewsroomDesign } from "@/components/designs/newsroom/newsroom-design";
 import { DitheredDesign } from "@/components/designs/dithered/dithered-design";
 import { NeobrutalismDesign } from "@/components/designs/neobrutalism/neobrutalism-design";
+import { HearthDesign } from "@/components/designs/hearth/hearth-design";
 import { isValidDesign, type FrontendDesign } from "@/lib/design-config";
 import {
   BASE_URL,
@@ -159,6 +160,8 @@ function App() {
       return <DitheredDesign {...designProps} />;
     case "neobrutalism":
       return <NeobrutalismDesign {...designProps} />;
+    case "hearth":
+      return <HearthDesign {...designProps} />;
     case "midnight":
     default:
       return <MidnightDesign {...designProps} />;
