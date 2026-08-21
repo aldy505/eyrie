@@ -106,7 +106,6 @@ export type UptimeData = {
 export type MonitorGroup = UptimeData["monitors"][number];
 export type Incident = IncidentsData["incidents"][number];
 export type AvailabilityStatus = "healthy" | "degraded" | "down";
-export type DashboardLayoutMode = "classic" | "grid";
 
 export type SummaryStats = {
   healthy: number;
