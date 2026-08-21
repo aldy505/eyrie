@@ -44,13 +44,25 @@ export function NewsroomServiceCard({ service, regionMap, metadata }: NewsroomSe
       </div>
       <p className="newsroom-service-summary">{summary}</p>
 
-      {allRegions.map((region) => (
-        <RegionRow
-          key={region.region}
-          region={region}
-          metadata={metadata}
-        />
-      ))}
+      {service.monitors.length === 0 ? (
+        <p className="newsroom-service-summary">No monitors configured</p>
+      ) : (
+        service.monitors.map((monitor) => {
+          const regions = regionMap[monitor.id] ?? [];
+          return (
+            <div key={monitor.id} className="newsroom-monitor-block">
+              <h3 className="newsroom-monitor-name">{monitor.name}</h3>
+              {regions.map((region) => (
+                <RegionRow
+                  key={region.region}
+                  region={region}
+                  metadata={metadata}
+                />
+              ))}
+            </div>
+          );
+        })
+      )}
     </div>
   );
 }

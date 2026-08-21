@@ -19,21 +19,23 @@ export function NewsroomDesign({
   regionMap,
 }: NewsroomDesignProps) {
   return (
-    <div className="newsroom-container">
-      <NewsroomHeader lastUpdated={data.last_updated ?? null} />
+    <div className="newsroom-shell">
+      <div className="newsroom-container">
+        <NewsroomHeader lastUpdated={data.last_updated ?? null} />
 
-      {data.monitors.length === 0 ? (
-        <div className="newsroom-empty">No services to monitor</div>
-      ) : (
-        data.monitors.map((service) => (
-          <NewsroomServiceCard
-            key={service.id}
-            service={service}
-            regionMap={regionMap}
-            metadata={metadata}
-          />
-        ))
-      )}
+        {data.monitors.length === 0 ? (
+          <div className="newsroom-empty">No services to monitor</div>
+        ) : (
+          data.monitors.map((service) => (
+            <NewsroomServiceCard
+              key={service.id}
+              service={service}
+              regionMap={regionMap}
+              metadata={metadata}
+            />
+          ))
+        )}
+      </div>
     </div>
   );
 }
