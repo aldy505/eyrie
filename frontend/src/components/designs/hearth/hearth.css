@@ -1,0 +1,237 @@
+/* Hearth Design — warm home-comfort aesthetic */
+
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap");
+
+/* Dark mode */
+:root[data-theme="dark"] .hearth-shell {
+  --hh-bg: #1A1815;
+  --hh-card: #2A2420;
+  --hh-border: rgba(232, 135, 109, 0.25);
+  --hh-text: #F5F3F0;
+  --hh-muted: #9B8F83;
+  --hh-healthy: #6B9C5C;
+  --hh-degraded: #D4936B;
+  --hh-down: #C65C5C;
+  --hh-accent: #E8876D;
+}
+
+/* Light mode */
+:root[data-theme="light"] .hearth-shell {
+  --hh-bg: #F8F6F3;
+  --hh-card: #FFFFFF;
+  --hh-border: #E8DFD5;
+  --hh-text: #2C2520;
+  --hh-muted: #7A6F66;
+  --hh-healthy: #59A33D;
+  --hh-degraded: #C4804B;
+  --hh-down: #B84C4C;
+  --hh-accent: #E8876D;
+}
+
+.hearth-shell {
+  min-height: 100vh;
+  background: var(--hh-bg);
+  color: var(--hh-text);
+  font-family: "Outfit", system-ui, -apple-system, sans-serif;
+}
+
+.hearth-container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 28px 16px;
+}
+
+/* Header */
+.hearth-header {
+  margin-bottom: 28px;
+}
+
+.hearth-header h1 {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--hh-text);
+}
+
+.hearth-subtitle {
+  font-size: 14px;
+  color: var(--hh-muted);
+  margin-top: 4px;
+}
+
+.hearth-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.hearth-header-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.hearth-last-scan {
+  font-size: 12px;
+  color: var(--hh-muted);
+}
+
+/* Theme Toggle */
+.hearth-theme-toggle {
+  border-radius: 24px;
+  border: 1px solid var(--hh-border);
+  background: var(--hh-card);
+  color: var(--hh-text);
+  font-family: "Outfit", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.hearth-theme-toggle:hover {
+  border-color: var(--hh-accent);
+  background: var(--hh-card);
+}
+
+/* Service Card */
+.hearth-service-card {
+  background: var(--hh-card);
+  border-radius: 12px;
+  border: 1px solid var(--hh-border);
+  padding: 28px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.hearth-service-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.hearth-status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.hearth-status-dot.healthy { background: var(--hh-healthy); }
+.hearth-status-dot.degraded { background: var(--hh-degraded); }
+.hearth-status-dot.down { background: var(--hh-down); }
+
+.hearth-service-name {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--hh-text);
+}
+
+.hearth-service-summary {
+  font-size: 14px;
+  color: var(--hh-muted);
+  margin: 0 0 4px 0;
+}
+
+/* Monitor Block */
+.hearth-monitor-block {
+  margin-top: 16px;
+}
+
+.hearth-monitor-block + .hearth-monitor-block {
+  margin-top: 20px;
+}
+
+.hearth-monitor-name {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--hh-muted);
+  margin: 0 0 8px 0;
+}
+
+/* Region Row */
+.hearth-region-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 16px;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.hearth-region-row + .hearth-region-row {
+  border-top: 1px solid var(--hh-border);
+}
+
+.hearth-region-name {
+  color: var(--hh-text);
+  text-transform: lowercase;
+}
+
+.hearth-region-status {
+  white-space: nowrap;
+}
+
+.hearth-region-status.healthy { color: var(--hh-healthy); }
+.hearth-region-status.degraded { color: var(--hh-degraded); }
+.hearth-region-status.down { color: var(--hh-down); }
+
+.hearth-region-time {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.hearth-region-time.fast { color: var(--hh-healthy); }
+.hearth-region-time.normal { color: var(--hh-text); }
+.hearth-region-time.slow { color: var(--hh-degraded); }
+.hearth-region-time.critical { color: var(--hh-down); }
+
+/* Downtime Badge */
+.hearth-downtime {
+  font-size: 11px;
+  color: var(--hh-degraded);
+  grid-column: 2 / -1;
+  text-align: right;
+  margin-top: 2px;
+}
+
+/* Empty State */
+.hearth-empty {
+  text-align: center;
+  padding: 48px 16px;
+  color: var(--hh-muted);
+  font-size: 15px;
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .hearth-container {
+    padding: 20px 12px;
+  }
+
+  .hearth-header h1 {
+    font-size: 20px;
+  }
+
+  .hearth-service-card {
+    padding: 20px;
+  }
+
+  .hearth-service-name {
+    font-size: 16px;
+  }
+
+  .hearth-region-row {
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    font-size: 12px;
+  }
+}
