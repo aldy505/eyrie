@@ -1,0 +1,228 @@
+/* Neobrutalism Design — bold, high-contrast, thick borders, hard shadows */
+
+@import url("https://fonts.googleapis.com/css2?family=Anton&family=IBM+Plex+Mono:wght@400;500;700&display=swap");
+
+/* Light mode */
+:root[data-theme="light"] .neobrutalism-shell {
+  --nb-bg: #FFFEF0;
+  --nb-card: #FFFFFF;
+  --nb-border: #000000;
+  --nb-text: #000000;
+  --nb-muted: #4B4B4B;
+  --nb-healthy: #00C853;
+  --nb-degraded: #FF9100;
+  --nb-down: #FF1744;
+  --nb-accent: #FF006E;
+  --nb-shadow: #000000;
+}
+
+/* Dark mode */
+:root[data-theme="dark"] .neobrutalism-shell {
+  --nb-bg: #121212;
+  --nb-card: #1A1A1A;
+  --nb-border: #FFFFFF;
+  --nb-text: #FFFFFF;
+  --nb-muted: #B0B0B0;
+  --nb-healthy: #00E676;
+  --nb-degraded: #FFB74D;
+  --nb-down: #FF5252;
+  --nb-accent: #00F5FF;
+  --nb-shadow: #FFFFFF;
+}
+
+.neobrutalism-shell {
+  min-height: 100vh;
+  background: var(--nb-bg);
+  color: var(--nb-text);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+.neobrutalism-container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 32px 16px;
+}
+
+/* Header */
+.neobrutalism-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+}
+
+.neobrutalism-header h1 {
+  font-family: "Anton", sans-serif;
+  font-size: 48px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0;
+  line-height: 1;
+}
+
+.neobrutalism-header-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.neobrutalism-last-scan {
+  font-size: 12px;
+  color: var(--nb-muted);
+}
+
+/* Theme Toggle */
+.neobrutalism-theme-toggle {
+  border: 3px solid var(--nb-border);
+  box-shadow: 4px 4px 0 var(--nb-shadow);
+  background: var(--nb-card);
+  color: var(--nb-text);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.neobrutalism-theme-toggle:hover {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0 var(--nb-shadow);
+}
+
+.neobrutalism-theme-toggle:active {
+  transform: translate(4px, 4px);
+  box-shadow: 0 0 0 var(--nb-shadow);
+}
+
+/* Service Card */
+.neobrutalism-service-card {
+  background: var(--nb-card);
+  border: 3px solid var(--nb-border);
+  box-shadow: 6px 6px 0 var(--nb-shadow);
+  margin-bottom: 24px;
+  padding: 20px;
+}
+
+.neobrutalism-service-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.neobrutalism-service-name {
+  font-family: "Anton", sans-serif;
+  font-size: 24px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.neobrutalism-service-uptime {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--nb-accent);
+}
+
+/* Monitor Block */
+.neobrutalism-monitor-block {
+  margin-top: 16px;
+}
+
+.neobrutalism-monitor-block + .neobrutalism-monitor-block {
+  margin-top: 20px;
+}
+
+.neobrutalism-monitor-name {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--nb-muted);
+  margin: 0 0 8px 0;
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--nb-accent);
+}
+
+/* Region Row */
+.neobrutalism-region-row {
+  display: grid;
+  grid-template-columns: 1fr auto 16px;
+  gap: 16px;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.neobrutalism-region-row + .neobrutalism-region-row {
+  border-top: 1px solid var(--nb-border);
+  opacity: 0.85;
+}
+
+.neobrutalism-region-name {
+  color: var(--nb-text);
+  text-transform: lowercase;
+}
+
+.neobrutalism-region-time {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.neobrutalism-region-time.fast { color: var(--nb-healthy); }
+.neobrutalism-region-time.normal { color: var(--nb-text); }
+.neobrutalism-region-time.slow { color: var(--nb-degraded); }
+.neobrutalism-region-time.critical { color: var(--nb-down); }
+
+/* Status Square */
+.neobrutalism-status-square {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--nb-border);
+}
+
+.neobrutalism-status-square.healthy { background: var(--nb-healthy); }
+.neobrutalism-status-square.degraded { background: var(--nb-degraded); }
+.neobrutalism-status-square.down { background: var(--nb-down); }
+
+/* Downtime Badge */
+.neobrutalism-downtime {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--nb-degraded);
+  grid-column: 2 / -1;
+  text-align: right;
+  margin-top: 2px;
+}
+
+/* Empty State */
+.neobrutalism-empty {
+  text-align: center;
+  padding: 48px 16px;
+  color: var(--nb-muted);
+  font-size: 14px;
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .neobrutalism-header h1 {
+    font-size: 32px;
+  }
+
+  .neobrutalism-service-name {
+    font-size: 18px;
+  }
+
+  .neobrutalism-region-row {
+    grid-template-columns: 1fr auto 16px;
+    gap: 8px;
+    font-size: 11px;
+  }
+}

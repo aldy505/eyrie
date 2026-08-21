@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { MidnightDesign } from "@/components/designs/midnight/midnight-design";
 import { NewsroomDesign } from "@/components/designs/newsroom/newsroom-design";
-import { HealthmapDesign } from "@/components/designs/healthmap/healthmap-design";
 import { DitheredDesign } from "@/components/designs/dithered/dithered-design";
+import { NeobrutalismDesign } from "@/components/designs/neobrutalism/neobrutalism-design";
 import { isValidDesign, type FrontendDesign } from "@/lib/design-config";
 import {
   BASE_URL,
@@ -155,10 +155,10 @@ function App() {
   switch (design) {
     case "newsroom":
       return <NewsroomDesign {...designProps} />;
-    case "healthmap":
-      return <HealthmapDesign {...designProps} />;
     case "dithered":
       return <DitheredDesign {...designProps} />;
+    case "neobrutalism":
+      return <NeobrutalismDesign {...designProps} />;
     case "midnight":
     default:
       return <MidnightDesign {...designProps} />;

@@ -4,10 +4,10 @@ import {
   type AvailabilityStatus,
 } from "@/lib/status-dashboard";
 
-export type FrontendDesign = "midnight" | "dithered" | "newsroom" | "healthmap" | "neobrutalism" | "hearth";
+export type FrontendDesign = "midnight" | "dithered" | "newsroom" | "neobrutalism" | "hearth";
 export type ThemeMode = "light" | "dark";
 
-export const DESIGN_NAMES: FrontendDesign[] = ["midnight", "dithered", "newsroom", "healthmap", "neobrutalism", "hearth"];
+export const DESIGN_NAMES: FrontendDesign[] = ["midnight", "dithered", "newsroom", "neobrutalism", "hearth"];
 
 export function isValidDesign(value: string): value is FrontendDesign {
   return DESIGN_NAMES.includes(value as FrontendDesign);
