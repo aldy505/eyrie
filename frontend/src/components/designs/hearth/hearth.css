@@ -203,6 +203,30 @@
   margin-top: 2px;
 }
 
+/* History Bars */
+.hearth-uptime-bars {
+  margin-top: 16px;
+}
+
+.hearth-uptime-bars-bar {
+  border-radius: 999px 999px 0 0;
+}
+
+.hearth-uptime-bars-bar.healthy { background: var(--hh-healthy); }
+.hearth-uptime-bars-bar.degraded { background: var(--hh-degraded); }
+.hearth-uptime-bars-bar.down { background: var(--hh-down); }
+
+.hearth-uptime-bars-nodata {
+  border-radius: 999px 999px 0 0;
+  background: var(--hh-text);
+  opacity: 0.08;
+}
+
+.hearth-uptime-bars-label {
+  font-size: 11px;
+  color: var(--hh-muted);
+}
+
 /* Empty State */
 .hearth-empty {
   text-align: center;

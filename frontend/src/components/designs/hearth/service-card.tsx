@@ -1,4 +1,5 @@
 import type { Metadata, RegionData, UptimeData } from "@/lib/status-dashboard";
+import { UptimeBars } from "@/components/uptime-bars";
 import { getRegionStatus } from "@/lib/design-config";
 import { getWorstStatus } from "@/lib/status-dashboard";
 import { RegionRow } from "./region-row";
@@ -57,6 +58,14 @@ export function ServiceCard({ service, regionMap, metadata }: ServiceCardProps) 
                   metadata={metadata}
                 />
               ))}
+              <UptimeBars
+                monitor={monitor}
+                metadata={metadata}
+                className="hearth-uptime-bars"
+                barClassName="hearth-uptime-bars-bar"
+                noDataBarClassName="hearth-uptime-bars-nodata"
+                labelClassName="hearth-uptime-bars-label"
+              />
             </div>
           );
         })
