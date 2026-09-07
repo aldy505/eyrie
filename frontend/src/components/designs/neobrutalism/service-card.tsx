@@ -1,4 +1,5 @@
 import type { Metadata, RegionData, UptimeData } from "@/lib/status-dashboard";
+import { UptimeBars } from "@/components/uptime-bars";
 import {
   getAvailabilityRatio,
   formatAvailability,
@@ -48,6 +49,14 @@ export function ServiceCard({ service, regionMap, metadata }: ServiceCardProps) 
                   metadata={metadata}
                 />
               ))}
+              <UptimeBars
+                monitor={monitor}
+                metadata={metadata}
+                className="neobrutalism-uptime-bars"
+                barClassName="neobrutalism-uptime-bars-bar"
+                noDataBarClassName="neobrutalism-uptime-bars-nodata"
+                labelClassName="neobrutalism-uptime-bars-label"
+              />
             </div>
           );
         })

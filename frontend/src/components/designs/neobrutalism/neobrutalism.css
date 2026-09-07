@@ -202,6 +202,33 @@
   margin-top: 2px;
 }
 
+/* History Bars */
+.neobrutalism-uptime-bars {
+  --uptime-bars-gap: 1px;
+  margin-top: 16px;
+  overflow-x: auto;
+}
+
+.neobrutalism-uptime-bars-bar {
+  min-width: 6px;
+}
+
+.neobrutalism-uptime-bars-bar.healthy { background: var(--nb-healthy); }
+.neobrutalism-uptime-bars-bar.degraded { background: var(--nb-degraded); }
+.neobrutalism-uptime-bars-bar.down { background: var(--nb-down); }
+
+.neobrutalism-uptime-bars-nodata {
+  min-width: 6px;
+  background: var(--nb-muted);
+  opacity: 0.25;
+}
+
+.neobrutalism-uptime-bars-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--nb-muted);
+}
+
 /* Empty State */
 .neobrutalism-empty {
   text-align: center;

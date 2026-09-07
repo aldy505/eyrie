@@ -6,7 +6,7 @@ server:
 metadata:
   title: "Eyrie Status Page"
   show_last_updated: true
-  frontend_design: "midnight"
+  frontend_design: "hearth"
 
 registered_checkers:
   - name: "us-east-1-public-checker"

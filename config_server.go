@@ -79,7 +79,7 @@ type ServerConfig struct {
 	Metadata struct {
 		Title           string `yaml:"title" default:"Status Page"`
 		ShowLastUpdated bool   `yaml:"show_last_updated" default:"true"`
-		FrontendDesign  string `yaml:"frontend_design" default:"midnight" envconfig:"EYRIE_FRONTEND_DESIGN"`
+		FrontendDesign  string `yaml:"frontend_design" default:"hearth" envconfig:"EYRIE_FRONTEND_DESIGN"`
 	} `yaml:"metadata"`
 	RegisteredCheckers []RegisteredChecker `yaml:"registered_checkers"`
 	Database           struct {
@@ -200,9 +200,9 @@ func (c ServerConfig) Validate() error {
 
 	design := strings.ToLower(strings.TrimSpace(c.Metadata.FrontendDesign))
 	switch design {
-	case "", "midnight", "dithered", "newsroom", "neobrutalism", "hearth":
+	case "", "hearth", "neobrutalism":
 	default:
-		return fmt.Errorf("metadata.frontend_design must be midnight, dithered, newsroom, neobrutalism, or hearth")
+		return fmt.Errorf("metadata.frontend_design must be hearth or neobrutalism")
 	}
 
 	return nil
