@@ -127,6 +127,8 @@ type ServerConfig struct {
 		ProfilingSampleRate   float64 `yaml:"profiling_sample_rate" default:"0.1"`
 		Debug                 bool    `yaml:"debug" default:"false"`
 		TraceOutgoingRequests bool    `yaml:"trace_outgoing_requests" default:"false"`
+		DisableMetrics        bool    `yaml:"disable_metrics" default:"false"`
+		DisableLogs           bool    `yaml:"disable_logs" default:"false"`
 	} `yaml:"sentry"`
 }
 
