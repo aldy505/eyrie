@@ -12,6 +12,8 @@ type CheckerConfig struct {
 		ProfilingSampleRate   float64 `yaml:"profiling_sample_rate" default:"0.1" envconfig:"SENTRY_PROFILING_SAMPLE_RATE"`
 		Debug                 bool    `yaml:"debug" default:"false" envconfig:"SENTRY_DEBUG"`
 		TraceOutgoingRequests bool    `yaml:"trace_outgoing_requests" default:"false" envconfig:"SENTRY_TRACE_OUTGOING_REQUESTS"`
+		DisableMetrics        bool    `yaml:"disable_metrics" default:"false" envconfig:"SENTRY_DISABLE_METRICS"`
+		DisableLogs           bool    `yaml:"disable_logs" default:"false" envconfig:"SENTRY_DISABLE_LOGS"`
 	} `yaml:"sentry"`
 }
 
