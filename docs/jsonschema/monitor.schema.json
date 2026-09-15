@@ -1,0 +1,292 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Eyrie Monitor Configuration",
+  "description": "Configuration schema for monitor definitions and grouping",
+  "type": "object",
+  "properties": {
+    "monitors": {
+      "type": "array",
+      "description": "List of monitors to execute",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "type"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the monitor"
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable name for the monitor"
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional description of what this monitor checks"
+          },
+          "interval": {
+            "type": "string",
+            "description": "Check interval (Go duration format)",
+            "default": "1m",
+            "examples": ["1m", "5m", "30s", "1h"]
+          },
+          "type": {
+            "type": "string",
+            "description": "Monitor type",
+            "enum": ["http", "tcp", "icmp", "redis", "postgres", "mysql", "mssql", "clickhouse"]
+          },
+          "checker_names": {
+            "type": "array",
+            "description": "Optional list of specific checkers to run this monitor. If empty, runs on all checkers",
+            "items": {
+              "type": "string"
+            }
+          },
+          "http": {
+            "type": "object",
+            "description": "HTTP probe configuration (type: http)",
+            "properties": {
+              "method": {
+                "type": "string",
+                "description": "HTTP method",
+                "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"],
+                "default": "GET"
+              },
+              "url": {
+                "type": "string",
+                "description": "URL to monitor"
+              },
+              "headers": {
+                "type": "object",
+                "description": "Custom HTTP headers",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "expected_status_codes": {
+                "type": "array",
+                "description": "List of acceptable HTTP status codes",
+                "items": {
+                  "type": "integer",
+                  "minimum": 100,
+                  "maximum": 599
+                },
+                "examples": [[200], [200, 301, 302]]
+              },
+              "skip_tls_verify": {
+                "type": "boolean",
+                "description": "Skip TLS certificate verification",
+                "default": false
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Request timeout in seconds",
+                "minimum": 1
+              },
+              "jq_assertion": {
+                "type": "string",
+                "description": "Optional JQ expression to validate response body"
+              }
+            }
+          },
+          "tcp": {
+            "type": "object",
+            "description": "TCP probe configuration (type: tcp)",
+            "properties": {
+              "address": {
+                "type": "string",
+                "description": "TCP address (host:port)",
+                "examples": ["example.com:443", "127.0.0.1:3306"]
+              },
+              "use_tls": {
+                "type": "boolean",
+                "description": "Use TLS for connection",
+                "default": false
+              },
+              "skip_tls_verify": {
+                "type": "boolean",
+                "description": "Skip TLS certificate verification",
+                "default": false
+              },
+              "send": {
+                "type": "string",
+                "description": "Optional data to send after connection"
+              },
+              "expect_contains": {
+                "type": "string",
+                "description": "Optional substring to expect in response"
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Connection timeout in seconds",
+                "minimum": 1
+              }
+            }
+          },
+          "icmp": {
+            "type": "object",
+            "description": "ICMP probe configuration (type: icmp)",
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "Host to ping",
+                "examples": ["1.1.1.1", "example.com"]
+              },
+              "count": {
+                "type": "integer",
+                "description": "Number of ping packets to send",
+                "default": 1,
+                "minimum": 1
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Ping timeout in seconds",
+                "minimum": 1
+              }
+            }
+          },
+          "redis": {
+            "type": "object",
+            "description": "Redis probe configuration (type: redis)",
+            "properties": {
+              "address": {
+                "type": "string",
+                "description": "Redis address (host:port)",
+                "examples": ["127.0.0.1:6379", "redis.example.com:6380"]
+              },
+              "password": {
+                "type": "string",
+                "description": "Optional Redis password"
+              },
+              "database": {
+                "type": "integer",
+                "description": "Redis database number",
+                "default": 0,
+                "minimum": 0
+              },
+              "use_tls": {
+                "type": "boolean",
+                "description": "Use TLS for connection",
+                "default": false
+              },
+              "skip_tls_verify": {
+                "type": "boolean",
+                "description": "Skip TLS certificate verification",
+                "default": false
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Connection timeout in seconds",
+                "minimum": 1
+              }
+            }
+          },
+          "postgres": {
+            "type": "object",
+            "description": "PostgreSQL probe configuration (type: postgres)",
+            "properties": {
+              "dsn": {
+                "type": "string",
+                "description": "PostgreSQL DSN connection string",
+                "examples": [
+                  "postgres://user:password@localhost:5432/database?sslmode=disable",
+                  "postgres://user:password@localhost:5432/database?sslmode=require"
+                ]
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Connection timeout in seconds",
+                "minimum": 1
+              }
+            }
+          },
+          "mysql": {
+            "type": "object",
+            "description": "MySQL probe configuration (type: mysql)",
+            "properties": {
+              "dsn": {
+                "type": "string",
+                "description": "MySQL DSN connection string",
+                "examples": [
+                  "user:password@tcp(localhost:3306)/database",
+                  "user:password@tcp(localhost:3306)/database?tls=true"
+                ]
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Connection timeout in seconds",
+                "minimum": 1
+              }
+            }
+          },
+          "mssql": {
+            "type": "object",
+            "description": "Microsoft SQL Server probe configuration (type: mssql)",
+            "properties": {
+              "dsn": {
+                "type": "string",
+                "description": "SQL Server connection string",
+                "examples": [
+                  "sqlserver://sa:password@localhost:1433?database=master",
+                  "sqlserver://sa:password@localhost:1433?database=master&encrypt=true"
+                ]
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Connection timeout in seconds",
+                "minimum": 1
+              }
+            }
+          },
+          "clickhouse": {
+            "type": "object",
+            "description": "ClickHouse probe configuration (type: clickhouse)",
+            "properties": {
+              "dsn": {
+                "type": "string",
+                "description": "ClickHouse DSN connection string",
+                "examples": [
+                  "clickhouse://default:password@localhost:9000/default",
+                  "clickhouse://default:password@localhost:8123/default?protocol=http"
+                ]
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "Connection timeout in seconds",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "description": "Optional monitor groups for status page organization",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique group identifier"
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable group name"
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional group description"
+          },
+          "monitor_ids": {
+            "type": "array",
+            "description": "List of monitor IDs in this group",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}
