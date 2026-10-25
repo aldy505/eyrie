@@ -117,6 +117,62 @@ func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 	}
 }
 
+func TestIngesterWorker_IngestMonitorHistoricalIsIdempotent(t *testing.T) {
+	monitorID := "test-ingest-idempotent"
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to get db connection: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID)
+		if err != nil {
+			t.Fatalf("failed to clean up monitor_historical table: %v", err)
+		}
+	})
+
+	ingesterWorker := &IngesterWorker{
+		db:         db,
+		subscriber: nil,
+		shutdown:   make(chan struct{}),
+	}
+
+	submission := CheckerSubmissionRequest{
+		MonitorID:  monitorID,
+		ProbeType:  string(MonitorTypeHTTP),
+		Success:    true,
+		LatencyMs:  10,
+		StatusCode: 200,
+		Timestamp:  time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+
+	// A redelivered message must not fail or duplicate the row.
+	for attempt := range 2 {
+		if err := ingesterWorker.ingestMonitorHistorical(t.Context(), submission, "us-east-1"); err != nil {
+			t.Fatalf("attempt %d: failed to ingest monitor historical: %v", attempt, err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get db connection for verification: %v", err)
+	}
+	defer conn.Close()
+
+	var count int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM monitor_historical WHERE monitor_id = ?`, monitorID).Scan(&count); err != nil {
+		t.Fatalf("failed to query count from monitor_historical: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 record after duplicate ingestion, got %d", count)
+	}
+}
+
 func TestIngesterWorker_IngestMonitorHistoricalUsesMonitorSuccessSemantics(t *testing.T) {
 	monitorID := "test-ingest-monitor-http-semantics"
 
