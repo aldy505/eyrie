@@ -83,7 +83,13 @@ func (w *ProcessorWorker) Start() error {
 			historicalSubmissions, err := w.lookback(ctx, request.MonitorID, lookbackSince)
 			if err != nil {
 				slog.ErrorContext(ctx, "looking back historical submissions", slog.String("error", err.Error()))
-				message.Ack()
+				// No state has been written yet, so redelivery is safe.
+				if message.Nackable() {
+					message.Nack()
+				} else {
+					message.Ack()
+				}
+				time.Sleep(100 * time.Millisecond)
 				span.Finish()
 				cancel()
 				continue
@@ -95,7 +101,13 @@ func (w *ProcessorWorker) Start() error {
 			previous, err := w.loadIncidentState(ctx, request.MonitorID)
 			if err != nil {
 				slog.ErrorContext(ctx, "loading incident state", slog.String("error", err.Error()))
-				message.Ack()
+				// No state has been written yet, so redelivery is safe.
+				if message.Nackable() {
+					message.Nack()
+				} else {
+					message.Ack()
+				}
+				time.Sleep(100 * time.Millisecond)
 				span.Finish()
 				cancel()
 				continue
@@ -104,28 +116,39 @@ func (w *ProcessorWorker) Start() error {
 			if !previous.Equal(evaluation) {
 				if err := w.storeIncidentState(ctx, request.MonitorID, evaluation); err != nil {
 					slog.ErrorContext(ctx, "storing incident state", slog.String("error", err.Error()))
+					// The state write did not land, so redelivery recomputes the
+					// same transition and is safe.
+					if message.Nackable() {
+						message.Nack()
+					} else {
+						message.Ack()
+					}
+					time.Sleep(100 * time.Millisecond)
+					span.Finish()
+					cancel()
+					continue
+				}
+
+				// From here on the incident state has already moved to the new
+				// evaluation. Replaying would skip this block (previous == evaluation),
+				// so a redelivery could not deliver the alert anyway. Keep these
+				// at-most-once until alert delivery has its own outbox/dedup key.
+				incidentID, err := w.syncProgrammaticIncident(ctx, monitor, evaluation)
+				if err != nil {
+					slog.ErrorContext(ctx, "syncing programmatic incident", slog.String("error", err.Error()))
 					message.Ack()
 					span.Finish()
 					cancel()
 					continue
 				}
 
-			incidentID, err := w.syncProgrammaticIncident(ctx, monitor, evaluation)
-			if err != nil {
-				slog.ErrorContext(ctx, "syncing programmatic incident", slog.String("error", err.Error()))
-				message.Ack()
-				span.Finish()
-				cancel()
-				continue
-			}
-
-			if err := w.publishAlert(ctx, monitor, evaluation, previous, incidentID); err != nil {
-				slog.ErrorContext(ctx, "publishing alert", slog.String("error", err.Error()))
-				message.Ack()
-				span.Finish()
-				cancel()
-				continue
-			}
+				if err := w.publishAlert(ctx, monitor, evaluation, previous, incidentID); err != nil {
+					slog.ErrorContext(ctx, "publishing alert", slog.String("error", err.Error()))
+					message.Ack()
+					span.Finish()
+					cancel()
+					continue
+				}
 
 				sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.incident.transitions", 1, sentry.WithAttributes(attribute.String("previous_status", previous.Status), attribute.String("next_status", evaluation.Status), attribute.String("next_scope", evaluation.Scope), attribute.String("probe_type", string(monitor.EffectiveType()))))
 			}
