@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestCheckerRegisterToUpstreamIncludesCheckerName(t *testing.T) {
@@ -43,5 +44,44 @@ func TestCheckerRegisterToUpstreamIncludesCheckerName(t *testing.T) {
 	}
 	if receivedRequest.Region != "us-east-1" {
 		t.Fatalf("expected checker region us-east-1, got %q", receivedRequest.Region)
+	}
+}
+
+func TestCheckerStartStopsDuringRegistrationRetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{
+		CheckerConfig: CheckerConfig{
+			UpstreamURL: server.URL,
+			Region:      "us-east-1",
+			ApiKey:      "test-key",
+		},
+		HttpClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	startReturned := make(chan error, 1)
+	go func() {
+		startReturned <- checker.Start()
+	}()
+
+	// Give Start a moment to enter the retry wait.
+	time.Sleep(50 * time.Millisecond)
+	if err := checker.Stop(); err != nil {
+		t.Fatalf("failed to stop checker: %v", err)
+	}
+
+	select {
+	case err := <-startReturned:
+		if err != nil {
+			t.Fatalf("expected checker to stop cleanly, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checker did not stop while waiting to retry registration")
 	}
 }

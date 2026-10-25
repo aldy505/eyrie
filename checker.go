@@ -47,19 +47,25 @@ func (c *Checker) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-REGISTER_UPSTREAM:
-	registerCtx, registerCancel := context.WithTimeout(ctx, time.Minute)
-	defer registerCancel()
+	const registrationRetryDelay = 10 * time.Second
+	for {
+		registerCtx, registerCancel := context.WithTimeout(ctx, time.Minute)
+		err := c.registerToUpstream(registerCtx)
+		registerCancel()
 
-	err := c.registerToUpstream(registerCtx)
-	if err != nil {
-		if errors.Is(err, ErrCheckerRegistrationFailed) {
-			slog.ErrorContext(ctx, "checker registration failed, will retry in 10 seconds", slog.String("error", err.Error()))
-			time.Sleep(10 * time.Second)
-			goto REGISTER_UPSTREAM
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrCheckerRegistrationFailed) {
+			return fmt.Errorf("registering to upstream: %w", err)
 		}
 
-		return fmt.Errorf("registering to upstream: %w", err)
+		slog.ErrorContext(ctx, "checker registration failed, will retry in 10 seconds", slog.String("error", err.Error()))
+		select {
+		case <-c.shutdown:
+			return nil
+		case <-time.After(registrationRetryDelay):
+		}
 	}
 
 	nextUpstreamFetch := time.Now().Add(10 * time.Minute)
