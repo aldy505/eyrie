@@ -22,6 +22,7 @@ type Checker struct {
 	config            CheckerConfig
 	httpClient        *http.Client
 	shutdown          chan struct{}
+	mu                sync.RWMutex
 	monitors          MonitorConfig
 	nextUpstreamFetch *time.Time
 }
@@ -63,7 +64,9 @@ REGISTER_UPSTREAM:
 	}
 
 	nextUpstreamFetch := time.Now().Add(10 * time.Minute)
+	c.mu.Lock()
 	c.nextUpstreamFetch = &nextUpstreamFetch
+	c.mu.Unlock()
 
 	for {
 		ctx := sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
@@ -73,11 +76,15 @@ REGISTER_UPSTREAM:
 			return nil
 		default:
 			currentTime := time.Now()
-			if c.nextUpstreamFetch != nil {
+			c.mu.RLock()
+			nextUpstreamFetch := c.nextUpstreamFetch
+			monitors := c.monitors
+			c.mu.RUnlock()
+			if nextUpstreamFetch != nil {
 				checkerCtx, checkerCancel := context.WithTimeout(ctx, time.Minute*5)
 
 				// Perform checks based on existing monitors
-				if len(c.monitors.Monitors) == 0 {
+				if len(monitors.Monitors) == 0 {
 					slog.InfoContext(ctx, "no monitors received from upstream, sleeping for 30 seconds")
 					time.Sleep(30 * time.Second)
 					checkerCancel()
@@ -97,13 +104,13 @@ REGISTER_UPSTREAM:
 				checkCycleStart := time.Now()
 				span := sentry.StartTransaction(checkerCtx, "checker.perform_checks", sentry.WithOpName("task.checker.cycle"), sentry.WithTransactionSource(sentry.SourceCustom))
 				ctx = span.Context()
-				span.SetData("eyrie.monitor_count", len(c.monitors.Monitors))
+				span.SetData("eyrie.monitor_count", len(monitors.Monitors))
 				span.SetData("eyrie.region", c.config.Region)
-				sentry.NewMeter(ctx).WithCtx(ctx).Gauge("eyrie.checker.monitors.configured", float64(len(c.monitors.Monitors)), sentry.WithAttributes(attribute.String("region", c.config.Region)))
-				slog.InfoContext(ctx, "performing checks for monitors", slog.Int("monitor_count", len(c.monitors.Monitors)))
+				sentry.NewMeter(ctx).WithCtx(ctx).Gauge("eyrie.checker.monitors.configured", float64(len(monitors.Monitors)), sentry.WithAttributes(attribute.String("region", c.config.Region)))
+				slog.InfoContext(ctx, "performing checks for monitors", slog.Int("monitor_count", len(monitors.Monitors)))
 				s := semaphore.NewWeighted(10) // Limit to 10 concurrent checks
 				wg := sync.WaitGroup{}
-				for _, monitor := range c.monitors.Monitors {
+				for _, monitor := range monitors.Monitors {
 					wg.Go(func() {
 						if err := s.Acquire(ctx, 1); err != nil {
 							slog.ErrorContext(ctx, "acquiring semaphore for monitor check", slog.String("error", err.Error()))
@@ -128,7 +135,7 @@ REGISTER_UPSTREAM:
 			}
 
 			// We fetch new monitor config from upstream in the background
-			if c.nextUpstreamFetch != nil && currentTime.After(*c.nextUpstreamFetch) {
+			if nextUpstreamFetch != nil && currentTime.After(*nextUpstreamFetch) {
 				go func() {
 					fetchCtx, fetchCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 					defer fetchCancel()
@@ -144,8 +151,10 @@ REGISTER_UPSTREAM:
 						return
 					}
 
-					nextUpstreamFetch := currentTime.Add(10 * time.Minute)
-					c.nextUpstreamFetch = &nextUpstreamFetch
+					nextFetch := currentTime.Add(10 * time.Minute)
+					c.mu.Lock()
+					c.nextUpstreamFetch = &nextFetch
+					c.mu.Unlock()
 				}()
 			}
 
@@ -207,7 +216,9 @@ func (c *Checker) registerToUpstream(ctx context.Context) error {
 		return fmt.Errorf("decoding registration response: %w", err)
 	}
 
+	c.mu.Lock()
 	c.monitors = monitorConfig
+	c.mu.Unlock()
 	return nil
 }
 
