@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/goccy/go-yaml"
+)
 
 func TestMonitorConfigValidateCheckerNames(t *testing.T) {
 	validCheckers := []RegisteredChecker{
@@ -107,5 +111,44 @@ func TestMonitorEffectiveAlertNamesDedupesAndSkipsBlankValues(t *testing.T) {
 	got := monitor.EffectiveAlertNames()
 	if len(got) != 2 || got[0] != "team-auth" || got[1] != "team-ops" {
 		t.Fatalf("unexpected effective alert names %#v", got)
+	}
+}
+
+func TestMonitorEffectiveHTTPExplicitFalseOverride(t *testing.T) {
+	var monitorConfig MonitorConfig
+	err := yaml.Unmarshal([]byte(`
+monitors:
+  - id: test-monitor
+    name: Test Monitor
+    skip_tls_verify: true
+    http:
+      url: https://example.com
+      skip_tls_verify: false
+`), &monitorConfig)
+	if err != nil {
+		t.Fatalf("failed to unmarshal monitor config: %v", err)
+	}
+
+	if got := monitorConfig.Monitors[0].EffectiveHTTP().SkipTLSVerifyValue(); got {
+		t.Fatalf("expected nested http.skip_tls_verify=false to override legacy true")
+	}
+}
+
+func TestMonitorEffectiveHTTPLegacyFallback(t *testing.T) {
+	var monitorConfig MonitorConfig
+	err := yaml.Unmarshal([]byte(`
+monitors:
+  - id: test-monitor
+    name: Test Monitor
+    skip_tls_verify: true
+    http:
+      url: https://example.com
+`), &monitorConfig)
+	if err != nil {
+		t.Fatalf("failed to unmarshal monitor config: %v", err)
+	}
+
+	if got := monitorConfig.Monitors[0].EffectiveHTTP().SkipTLSVerifyValue(); !got {
+		t.Fatalf("expected legacy skip_tls_verify=true to be used when nested value is unset")
 	}
 }

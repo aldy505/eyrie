@@ -883,3 +883,18 @@ func TestProbeDatabaseOpenFailure(t *testing.T) {
 		t.Fatalf("expected open failure to be preserved, got %q", submission.FailureReason.String)
 	}
 }
+
+func TestServerNameForAddress(t *testing.T) {
+	tests := map[string]string{
+		"example.com:443":   "example.com",
+		"[::1]:443":         "::1",
+		"[2001:db8::1]:443": "2001:db8::1",
+		"db.internal":       "db.internal",
+	}
+
+	for address, expected := range tests {
+		if got := serverNameForAddress(address); got != expected {
+			t.Fatalf("serverNameForAddress(%q) = %q, want %q", address, got, expected)
+		}
+	}
+}
