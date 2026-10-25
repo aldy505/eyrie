@@ -22,6 +22,28 @@ func TestServerConfigValidateRejectsDuplicateAPIKeys(t *testing.T) {
 	}
 }
 
+func TestServerConfigFindRegisteredCheckerRequiresExactKey(t *testing.T) {
+	config := ServerConfig{
+		RegisteredCheckers: []RegisteredChecker{
+			{Name: "public-east", Region: "us-east-1", ApiKey: "correct-key"},
+		},
+	}
+
+	checker, ok := config.FindRegisteredChecker("public-east", "us-east-1", "correct-key")
+	if !ok {
+		t.Fatal("expected correct API key to match")
+	}
+	if checker.Region != "us-east-1" {
+		t.Fatalf("expected us-east-1, got %q", checker.Region)
+	}
+
+	for _, apiKey := range []string{"correct-ke", "correct-key ", "wrong-key", ""} {
+		if _, ok := config.FindRegisteredChecker("public-east", "us-east-1", apiKey); ok {
+			t.Fatalf("expected API key %q to be rejected", apiKey)
+		}
+	}
+}
+
 func TestServerConfigValidateRejectsNegativeReadConcurrencyLimit(t *testing.T) {
 	config := ServerConfig{}
 	config.Database.ReadConcurrencyLimit = -1

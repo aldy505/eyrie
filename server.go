@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -1315,7 +1316,7 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 	var region string
 	var validChecker bool
 	for _, checker := range s.serverConfig.RegisteredCheckers {
-		if checker.ApiKey == apiKey {
+		if subtle.ConstantTimeCompare([]byte(checker.ApiKey), []byte(apiKey)) == 1 {
 			validChecker = true
 			region = checker.Region
 			break
