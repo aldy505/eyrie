@@ -279,15 +279,18 @@ func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerS
 		return
 	}
 
-	var retryRemaining = 3
+	const maxAttempts = 3
 	var parentErr error
-	for retryRemaining > 0 {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		retryDelay := time.Duration(attempt) * 250 * time.Millisecond
+
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestUrl, bytes.NewReader(submissionBody))
 		if err != nil {
 			parentErr = fmt.Errorf("creating submission request: %w", err)
 			slog.ErrorContext(ctx, "creating submission request", slog.String("error", err.Error()))
-			retryRemaining--
-			time.Sleep(time.Millisecond * 10)
+			if attempt < maxAttempts {
+				time.Sleep(retryDelay)
+			}
 			continue
 		}
 		request.Header.Set("Content-Type", "application/json")
@@ -297,21 +300,22 @@ func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerS
 		if err != nil {
 			parentErr = fmt.Errorf("sending submission request: %w", err)
 			slog.ErrorContext(ctx, "sending submission request", slog.String("error", err.Error()))
-			retryRemaining--
-			time.Sleep(time.Millisecond * 10)
+			if attempt < maxAttempts {
+				time.Sleep(retryDelay)
+			}
 			continue
 		}
-		defer func() {
-			if response.Body != nil {
-				_ = response.Body.Close()
-			}
-		}()
+
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
 
 		if response.StatusCode != http.StatusOK {
 			parentErr = fmt.Errorf("received non-200 status code %d", response.StatusCode)
 			slog.ErrorContext(ctx, "submission request failed", slog.String("error", parentErr.Error()))
-			retryRemaining--
-			time.Sleep(time.Millisecond * 10)
+			if attempt < maxAttempts {
+				time.Sleep(retryDelay)
+			}
 			continue
 		}
 

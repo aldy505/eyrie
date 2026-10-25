@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCheckerRegisterToUpstreamIncludesCheckerName(t *testing.T) {
@@ -43,5 +46,39 @@ func TestCheckerRegisterToUpstreamIncludesCheckerName(t *testing.T) {
 	}
 	if receivedRequest.Region != "us-east-1" {
 		t.Fatalf("expected checker region us-east-1, got %q", receivedRequest.Region)
+	}
+}
+
+func TestCheckerSendMonitorSubmissionRetries(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{
+		CheckerConfig: CheckerConfig{
+			UpstreamURL: server.URL,
+			Region:      "us-east-1",
+			ApiKey:      "test-key",
+		},
+		HttpClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	checker.sendMonitorSubmission(context.Background(), CheckerSubmissionRequest{
+		MonitorID: "test-monitor",
+		ProbeType: string(MonitorTypeHTTP),
+		Timestamp: time.Now().UTC(),
+	})
+
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("expected 3 submission attempts, got %d", got)
 	}
 }
