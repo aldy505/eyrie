@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestCheckerRegisterToUpstreamIncludesCheckerName(t *testing.T) {
@@ -43,5 +44,33 @@ func TestCheckerRegisterToUpstreamIncludesCheckerName(t *testing.T) {
 	}
 	if receivedRequest.Region != "us-east-1" {
 		t.Fatalf("expected checker region us-east-1, got %q", receivedRequest.Region)
+	}
+}
+
+func TestCheckerStopWaitsForInFlightSubmissions(t *testing.T) {
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	checker.submissions.Add(1)
+	stopped := make(chan struct{})
+	go func() {
+		_ = checker.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned before the in-flight submission finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	checker.submissions.Done()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after the in-flight submission finished")
 	}
 }

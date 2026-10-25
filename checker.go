@@ -19,11 +19,14 @@ import (
 )
 
 type Checker struct {
-	config            CheckerConfig
-	httpClient        *http.Client
-	shutdown          chan struct{}
-	monitors          MonitorConfig
-	nextUpstreamFetch *time.Time
+	config             CheckerConfig
+	httpClient         *http.Client
+	shutdown           chan struct{}
+	submissionMu       sync.Mutex
+	submissions        sync.WaitGroup
+	submissionsClosing bool
+	monitors           MonitorConfig
+	nextUpstreamFetch  *time.Time
 }
 
 type CheckerOptions struct {
@@ -156,6 +159,25 @@ REGISTER_UPSTREAM:
 
 func (c *Checker) Stop() error {
 	close(c.shutdown)
+
+	// Prevent new submissions from being scheduled, then wait for the ones
+	// already in flight so their results are not lost on process exit.
+	c.submissionMu.Lock()
+	c.submissionsClosing = true
+	c.submissionMu.Unlock()
+
+	drained := make(chan struct{})
+	go func() {
+		c.submissions.Wait()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		slog.Warn("timed out waiting for in-flight monitor submissions")
+	}
+
 	return nil
 }
 
@@ -254,7 +276,19 @@ func (c *Checker) performMonitorCheck(ctx context.Context, monitor Monitor) erro
 		sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.latency", float64(submission.LatencyMs), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", submission.ProbeType), attribute.String("region", c.config.Region), attribute.String("result", result)))
 	}
 
-	go c.sendMonitorSubmission(ctx, submission)
+	c.submissionMu.Lock()
+	if c.submissionsClosing {
+		c.submissionMu.Unlock()
+		return nil
+	}
+	c.submissions.Add(1)
+	c.submissionMu.Unlock()
+
+	go func() {
+		defer c.submissions.Done()
+		c.sendMonitorSubmission(ctx, submission)
+	}()
+
 	return nil
 }
 
