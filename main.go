@@ -54,9 +54,12 @@ func main() {
 		}
 
 		var serverConfig ServerConfig
-		envconfig.Process("", &serverConfig)
 		if err := yaml.Unmarshal(serverConfigFile, &serverConfig); err != nil {
 			slog.Error("failed to unmarshal config file", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		if err := envconfig.Process("", &serverConfig); err != nil {
+			slog.Error("failed to process server config environment", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
 		if err := serverConfig.Validate(); err != nil {
@@ -71,9 +74,12 @@ func main() {
 		}
 
 		var monitorConfig MonitorConfig
-		envconfig.Process("", &monitorConfig)
 		if err := yaml.Unmarshal(monitorConfigFile, &monitorConfig); err != nil {
 			slog.Error("failed to unmarshal monitor file", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		if err := envconfig.Process("", &monitorConfig); err != nil {
+			slog.Error("failed to process monitor config environment", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
 		if err := monitorConfig.Validate(serverConfig.RegisteredCheckers); err != nil {
@@ -280,7 +286,6 @@ func main() {
 		slog.Info("shutting down server")
 	case "checker":
 		var checkerConfig CheckerConfig
-		envconfig.Process("", &checkerConfig)
 		checkerConfigFile, err := os.ReadFile(*configPath)
 		if err == nil {
 			if err := yaml.Unmarshal(checkerConfigFile, &checkerConfig); err != nil {
@@ -289,6 +294,10 @@ func main() {
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			slog.Error("failed to read config file", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		if err := envconfig.Process("", &checkerConfig); err != nil {
+			slog.Error("failed to process checker config environment", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
 
