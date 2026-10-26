@@ -169,12 +169,11 @@ func TestProbeHTTPMutualTLS(t *testing.T) {
 }
 
 func TestNewTLSConfigCachesSystemCertPool(t *testing.T) {
-	oldOnce := systemCertPoolOnce
 	oldPool := systemCertPool
 	oldErr := systemCertPoolErr
 	oldLoader := systemCertPoolLoad
 	t.Cleanup(func() {
-		systemCertPoolOnce = oldOnce
+		systemCertPoolOnce = sync.Once{}
 		systemCertPool = oldPool
 		systemCertPoolErr = oldErr
 		systemCertPoolLoad = oldLoader
@@ -214,12 +213,11 @@ func TestNewTLSConfigCachesSystemCertPool(t *testing.T) {
 }
 
 func TestNewTLSConfigFallsBackToEmptyPoolWhenSystemRootsUnavailable(t *testing.T) {
-	oldOnce := systemCertPoolOnce
 	oldPool := systemCertPool
 	oldErr := systemCertPoolErr
 	oldLoader := systemCertPoolLoad
 	t.Cleanup(func() {
-		systemCertPoolOnce = oldOnce
+		systemCertPoolOnce = sync.Once{}
 		systemCertPool = oldPool
 		systemCertPoolErr = oldErr
 		systemCertPoolLoad = oldLoader
