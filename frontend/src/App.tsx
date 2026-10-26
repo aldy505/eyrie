@@ -18,8 +18,10 @@ import {
 
 const REGION_FETCH_JITTER_MAX_MS = 5000;
 
+const REQUEST_TIMEOUT_MS = 60_000;
+
 async function fetchJson(url: string) {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   if (!response.ok) {
     throw new Error(`Request failed for ${url}: ${response.status} ${response.statusText}`);
   }
