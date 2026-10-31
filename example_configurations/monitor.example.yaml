@@ -53,6 +53,19 @@ monitors:
       host: "1.1.1.1"
       count: 1
       timeout_seconds: 5
+  - id: "example-grpc-1"
+    name: "Example gRPC Health Monitor"
+    interval: "1m"
+    type: "grpc"
+    grpc:
+      # Address of the gRPC server, without a scheme.
+      address: "127.0.0.1:50051"
+      # Optional service name passed to grpc.health.v1.Health/Check.
+      # Leave empty to check the overall server health.
+      service: ""
+      use_tls: false
+      skip_tls_verify: false
+      timeout_seconds: 10
   - id: "example-monitor-2"
     name: "Example Monitor 2"
     interval: "5m"

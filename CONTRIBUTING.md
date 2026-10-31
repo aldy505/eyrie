@@ -51,6 +51,7 @@ Eyrie currently supports:
 - HTTP
 - TCP
 - ICMP
+- gRPC (standard `grpc.health.v1.Health/Check` health protocol)
 - Redis
 - PostgreSQL
 - MySQL

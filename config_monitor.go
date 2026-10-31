@@ -20,6 +20,7 @@ const (
 	MonitorTypeMySQL      MonitorType = "mysql"
 	MonitorTypeMSSQL      MonitorType = "mssql"
 	MonitorTypeClickHouse MonitorType = "clickhouse"
+	MonitorTypeGRPC       MonitorType = "grpc"
 )
 
 type MonitorHTTPConfig struct {
@@ -80,6 +81,14 @@ type MonitorClickHouseConfig struct {
 	TimeoutSeconds null.Int `yaml:"timeout_seconds" json:"timeout_seconds"`
 }
 
+type MonitorGRPCConfig struct {
+	Address        string   `yaml:"address" json:"address"`
+	Service        string   `yaml:"service" json:"service"`
+	UseTLS         bool     `yaml:"use_tls" json:"use_tls" default:"false"`
+	SkipTLSVerify  bool     `yaml:"skip_tls_verify" json:"skip_tls_verify" default:"false"`
+	TimeoutSeconds null.Int `yaml:"timeout_seconds" json:"timeout_seconds"`
+}
+
 type Monitor struct {
 	ID           string      `yaml:"id" json:"id"`
 	Name         string      `yaml:"name" json:"name"`
@@ -106,6 +115,7 @@ type Monitor struct {
 	MySQL      MonitorMySQLConfig      `yaml:"mysql" json:"mysql"`
 	MSSQL      MonitorMSSQLConfig      `yaml:"mssql" json:"mssql"`
 	ClickHouse MonitorClickHouseConfig `yaml:"clickhouse" json:"clickhouse"`
+	GRPC       MonitorGRPCConfig       `yaml:"grpc" json:"grpc"`
 }
 
 type Group struct {
@@ -194,6 +204,9 @@ func (m Monitor) EffectiveType() MonitorType {
 	if m.ClickHouse.DSN != "" {
 		return MonitorTypeClickHouse
 	}
+	if m.GRPC.Address != "" {
+		return MonitorTypeGRPC
+	}
 	if m.Redis.Address != "" {
 		return MonitorTypeRedis
 	}
@@ -280,6 +293,10 @@ func (m Monitor) EffectiveTimeout(defaultSeconds time.Duration) time.Duration {
 		if m.ClickHouse.TimeoutSeconds.Valid {
 			return time.Duration(m.ClickHouse.TimeoutSeconds.Int64) * time.Second
 		}
+	case MonitorTypeGRPC:
+		if m.GRPC.TimeoutSeconds.Valid {
+			return time.Duration(m.GRPC.TimeoutSeconds.Int64) * time.Second
+		}
 	}
 	return defaultSeconds
 }
@@ -364,6 +381,10 @@ func (m Monitor) Validate() error {
 	case MonitorTypeClickHouse:
 		if m.ClickHouse.DSN == "" {
 			return fmt.Errorf("monitor %s: clickhouse.dsn is required", m.ID)
+		}
+	case MonitorTypeGRPC:
+		if m.GRPC.Address == "" {
+			return fmt.Errorf("monitor %s: grpc.address is required", m.ID)
 		}
 	default:
 		return fmt.Errorf("monitor %s: unsupported type %q", m.ID, m.EffectiveType())
