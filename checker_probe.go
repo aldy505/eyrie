@@ -48,6 +48,8 @@ func (c *Checker) probeMonitor(ctx context.Context, monitor Monitor) CheckerSubm
 		return c.probeMSSQL(ctx, monitor)
 	case MonitorTypeClickHouse:
 		return c.probeClickHouse(ctx, monitor)
+	case MonitorTypeGRPC:
+		return c.probeGRPC(ctx, monitor)
 	default:
 		return c.probeHTTP(ctx, monitor)
 	}
