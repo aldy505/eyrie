@@ -65,6 +65,7 @@
     - `mysql`
     - `mssql`
     - `clickhouse`
+    - `grpc` (standard `grpc.health.v1.Health/Check` health protocol)
   - `groups` (group monitors for status page aggregation)
 
 ### Database Monitor Notes
@@ -74,6 +75,7 @@
 - ClickHouse uses `clickhouse.dsn`
   - native TCP example: `clickhouse://default:@127.0.0.1:9000/default`
   - HTTP example: `clickhouse://default:@127.0.0.1:8123/default?protocol=http`
+- gRPC uses `grpc.address`, optional `grpc.service`, and optional TLS (`use_tls`, `skip_tls_verify`)
 
 ### Example Configs
 See `example_configurations/` for:

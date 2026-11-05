@@ -139,6 +139,17 @@ func (w *IngesterWorker) Start() error {
 					hub.CaptureException(fmt.Errorf("ingesting monitor historical: %w", err))
 				}
 				slog.ErrorContext(ctx, "ingesting monitor historical", slog.String("error", err.Error()))
+				// The insert is idempotent (ON CONFLICT DO NOTHING), so a
+				// redelivery after a transient database failure is safe.
+				if message.Nackable() {
+					message.Nack()
+				} else {
+					message.Ack()
+				}
+				time.Sleep(100 * time.Millisecond)
+				span.Finish()
+				cancel()
+				continue
 			}
 
 			message.Ack()
@@ -413,6 +424,7 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 				?,
 				?
 			)
+		ON CONFLICT DO NOTHING
 	`,
 		submission.MonitorID,
 		region,

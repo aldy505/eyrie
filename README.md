@@ -7,7 +7,7 @@ The backend is a Go monolith that can run as a **server** or a **checker**. The 
 ## Current capabilities
 
 - Region-aware monitor execution with checker registration and authenticated result submission
-- HTTP, TCP, ICMP, Redis, PostgreSQL, MySQL, Microsoft SQL Server, and ClickHouse monitors
+- HTTP, TCP, ICMP, gRPC health checks, Redis, PostgreSQL, MySQL, Microsoft SQL Server, and ClickHouse monitors
 - ClickHouse support over both native TCP and HTTP transport through DSN configuration
 - Raw submission ingestion plus daily uptime aggregation in DuckDB
 - Programmatic incidents with persisted lifecycle records and event timeline groundwork
@@ -21,6 +21,7 @@ The backend is a Go monolith that can run as a **server** or a **checker**. The 
 | HTTP | `http` | Supports headers, expected status codes, custom CA trust, and optional client certificates |
 | TCP | `tcp` | Optional TLS, request payload, and substring assertion |
 | ICMP | `icmp` | Uses the system `ping` binary |
+| gRPC | `grpc` | Calls the standard `grpc.health.v1.Health/Check` RPC; optional service name and TLS |
 | Redis | `redis` | Optional auth, database selection, and TLS |
 | PostgreSQL | `postgres` | Uses a DSN via `pgx` |
 | MySQL | `mysql` | Uses a DSN via `go-sql-driver/mysql` |

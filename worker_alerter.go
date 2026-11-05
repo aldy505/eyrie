@@ -62,6 +62,7 @@ func (w *AlerterWorker) Start() error {
 				} else {
 					message.Ack()
 				}
+				cancel()
 				continue
 			}
 

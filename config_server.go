@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -227,7 +228,7 @@ func validateAlertName(seen map[string]string, path string, idx int, name string
 
 func (c ServerConfig) FindRegisteredChecker(name string, region string, apiKey string) (RegisteredChecker, bool) {
 	for _, checker := range c.RegisteredCheckers {
-		if checker.ApiKey != apiKey || checker.Region != region {
+		if subtle.ConstantTimeCompare([]byte(checker.ApiKey), []byte(apiKey)) != 1 || checker.Region != region {
 			continue
 		}
 		if name != "" && name != checker.EffectiveName() {

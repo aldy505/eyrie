@@ -169,12 +169,11 @@ func TestProbeHTTPMutualTLS(t *testing.T) {
 }
 
 func TestNewTLSConfigCachesSystemCertPool(t *testing.T) {
-	oldOnce := systemCertPoolOnce
 	oldPool := systemCertPool
 	oldErr := systemCertPoolErr
 	oldLoader := systemCertPoolLoad
 	t.Cleanup(func() {
-		systemCertPoolOnce = oldOnce
+		systemCertPoolOnce = sync.Once{}
 		systemCertPool = oldPool
 		systemCertPoolErr = oldErr
 		systemCertPoolLoad = oldLoader
@@ -214,12 +213,11 @@ func TestNewTLSConfigCachesSystemCertPool(t *testing.T) {
 }
 
 func TestNewTLSConfigFallsBackToEmptyPoolWhenSystemRootsUnavailable(t *testing.T) {
-	oldOnce := systemCertPoolOnce
 	oldPool := systemCertPool
 	oldErr := systemCertPoolErr
 	oldLoader := systemCertPoolLoad
 	t.Cleanup(func() {
-		systemCertPoolOnce = oldOnce
+		systemCertPoolOnce = sync.Once{}
 		systemCertPool = oldPool
 		systemCertPoolErr = oldErr
 		systemCertPoolLoad = oldLoader
@@ -881,5 +879,20 @@ func TestProbeDatabaseOpenFailure(t *testing.T) {
 	}
 	if submission.FailureReason.String != "invalid dsn" {
 		t.Fatalf("expected open failure to be preserved, got %q", submission.FailureReason.String)
+	}
+}
+
+func TestServerNameForAddress(t *testing.T) {
+	tests := map[string]string{
+		"example.com:443":   "example.com",
+		"[::1]:443":         "::1",
+		"[2001:db8::1]:443": "2001:db8::1",
+		"db.internal":       "db.internal",
+	}
+
+	for address, expected := range tests {
+		if got := serverNameForAddress(address); got != expected {
+			t.Fatalf("serverNameForAddress(%q) = %q, want %q", address, got, expected)
+		}
 	}
 }
