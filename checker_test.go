@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -72,5 +74,78 @@ func TestCheckerStopWaitsForInFlightSubmissions(t *testing.T) {
 	case <-stopped:
 	case <-time.After(time.Second):
 		t.Fatal("Stop did not return after the in-flight submission finished")
+	}
+}
+
+func TestCheckerSendMonitorSubmissionRetries(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{
+		CheckerConfig: CheckerConfig{
+			UpstreamURL: server.URL,
+			Region:      "us-east-1",
+			ApiKey:      "test-key",
+		},
+		HttpClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	checker.sendMonitorSubmission(context.Background(), CheckerSubmissionRequest{
+		MonitorID: "test-monitor",
+		ProbeType: string(MonitorTypeHTTP),
+		Timestamp: time.Now().UTC(),
+	})
+
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("expected 3 submission attempts, got %d", got)
+	}
+}
+
+func TestCheckerStartStopsDuringRegistrationRetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	checker, err := NewChecker(CheckerOptions{
+		CheckerConfig: CheckerConfig{
+			UpstreamURL: server.URL,
+			Region:      "us-east-1",
+			ApiKey:      "test-key",
+		},
+		HttpClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	startReturned := make(chan error, 1)
+	go func() {
+		startReturned <- checker.Start()
+	}()
+
+	// Give Start a moment to enter the retry wait.
+	time.Sleep(50 * time.Millisecond)
+	if err := checker.Stop(); err != nil {
+		t.Fatalf("failed to stop checker: %v", err)
+	}
+
+	select {
+	case err := <-startReturned:
+		if err != nil {
+			t.Fatalf("expected checker to stop cleanly, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checker did not stop while waiting to retry registration")
 	}
 }

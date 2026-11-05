@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -110,8 +111,13 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.Handle("/", spa)
 
 	srv := &http.Server{
-		Addr:    net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
-		Handler: mux,
+		Addr:              net.JoinHostPort(s.serverConfig.Server.Host, strconv.Itoa(s.serverConfig.Server.Port)),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	s.Server = srv
@@ -1315,7 +1321,7 @@ func (s *Server) CheckerSubmission(w http.ResponseWriter, r *http.Request) {
 	var region string
 	var validChecker bool
 	for _, checker := range s.serverConfig.RegisteredCheckers {
-		if checker.ApiKey == apiKey {
+		if subtle.ConstantTimeCompare([]byte(checker.ApiKey), []byte(apiKey)) == 1 {
 			validChecker = true
 			region = checker.Region
 			break

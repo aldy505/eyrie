@@ -25,6 +25,7 @@ type Checker struct {
 	submissionMu       sync.Mutex
 	submissions        sync.WaitGroup
 	submissionsClosing bool
+	mu                 sync.RWMutex
 	monitors           MonitorConfig
 	nextUpstreamFetch  *time.Time
 }
@@ -50,23 +51,31 @@ func (c *Checker) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-REGISTER_UPSTREAM:
-	registerCtx, registerCancel := context.WithTimeout(ctx, time.Minute)
-	defer registerCancel()
+	const registrationRetryDelay = 10 * time.Second
+	for {
+		registerCtx, registerCancel := context.WithTimeout(ctx, time.Minute)
+		err := c.registerToUpstream(registerCtx)
+		registerCancel()
 
-	err := c.registerToUpstream(registerCtx)
-	if err != nil {
-		if errors.Is(err, ErrCheckerRegistrationFailed) {
-			slog.ErrorContext(ctx, "checker registration failed, will retry in 10 seconds", slog.String("error", err.Error()))
-			time.Sleep(10 * time.Second)
-			goto REGISTER_UPSTREAM
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrCheckerRegistrationFailed) {
+			return fmt.Errorf("registering to upstream: %w", err)
 		}
 
-		return fmt.Errorf("registering to upstream: %w", err)
+		slog.ErrorContext(ctx, "checker registration failed, will retry in 10 seconds", slog.String("error", err.Error()))
+		select {
+		case <-c.shutdown:
+			return nil
+		case <-time.After(registrationRetryDelay):
+		}
 	}
 
 	nextUpstreamFetch := time.Now().Add(10 * time.Minute)
+	c.mu.Lock()
 	c.nextUpstreamFetch = &nextUpstreamFetch
+	c.mu.Unlock()
 
 	for {
 		ctx := sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
@@ -76,11 +85,15 @@ REGISTER_UPSTREAM:
 			return nil
 		default:
 			currentTime := time.Now()
-			if c.nextUpstreamFetch != nil {
+			c.mu.RLock()
+			nextUpstreamFetch := c.nextUpstreamFetch
+			monitors := c.monitors
+			c.mu.RUnlock()
+			if nextUpstreamFetch != nil {
 				checkerCtx, checkerCancel := context.WithTimeout(ctx, time.Minute*5)
 
 				// Perform checks based on existing monitors
-				if len(c.monitors.Monitors) == 0 {
+				if len(monitors.Monitors) == 0 {
 					slog.InfoContext(ctx, "no monitors received from upstream, sleeping for 30 seconds")
 					time.Sleep(30 * time.Second)
 					checkerCancel()
@@ -100,13 +113,13 @@ REGISTER_UPSTREAM:
 				checkCycleStart := time.Now()
 				span := sentry.StartTransaction(checkerCtx, "checker.perform_checks", sentry.WithOpName("task.checker.cycle"), sentry.WithTransactionSource(sentry.SourceCustom))
 				ctx = span.Context()
-				span.SetData("eyrie.monitor_count", len(c.monitors.Monitors))
+				span.SetData("eyrie.monitor_count", len(monitors.Monitors))
 				span.SetData("eyrie.region", c.config.Region)
-				sentry.NewMeter(ctx).WithCtx(ctx).Gauge("eyrie.checker.monitors.configured", float64(len(c.monitors.Monitors)), sentry.WithAttributes(attribute.String("region", c.config.Region)))
-				slog.InfoContext(ctx, "performing checks for monitors", slog.Int("monitor_count", len(c.monitors.Monitors)))
+				sentry.NewMeter(ctx).WithCtx(ctx).Gauge("eyrie.checker.monitors.configured", float64(len(monitors.Monitors)), sentry.WithAttributes(attribute.String("region", c.config.Region)))
+				slog.InfoContext(ctx, "performing checks for monitors", slog.Int("monitor_count", len(monitors.Monitors)))
 				s := semaphore.NewWeighted(10) // Limit to 10 concurrent checks
 				wg := sync.WaitGroup{}
-				for _, monitor := range c.monitors.Monitors {
+				for _, monitor := range monitors.Monitors {
 					wg.Go(func() {
 						if err := s.Acquire(ctx, 1); err != nil {
 							slog.ErrorContext(ctx, "acquiring semaphore for monitor check", slog.String("error", err.Error()))
@@ -131,7 +144,7 @@ REGISTER_UPSTREAM:
 			}
 
 			// We fetch new monitor config from upstream in the background
-			if c.nextUpstreamFetch != nil && currentTime.After(*c.nextUpstreamFetch) {
+			if nextUpstreamFetch != nil && currentTime.After(*nextUpstreamFetch) {
 				go func() {
 					fetchCtx, fetchCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 					defer fetchCancel()
@@ -147,8 +160,10 @@ REGISTER_UPSTREAM:
 						return
 					}
 
-					nextUpstreamFetch := currentTime.Add(10 * time.Minute)
-					c.nextUpstreamFetch = &nextUpstreamFetch
+					nextFetch := currentTime.Add(10 * time.Minute)
+					c.mu.Lock()
+					c.nextUpstreamFetch = &nextFetch
+					c.mu.Unlock()
 				}()
 			}
 
@@ -229,7 +244,9 @@ func (c *Checker) registerToUpstream(ctx context.Context) error {
 		return fmt.Errorf("decoding registration response: %w", err)
 	}
 
+	c.mu.Lock()
 	c.monitors = monitorConfig
+	c.mu.Unlock()
 	return nil
 }
 
@@ -313,15 +330,18 @@ func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerS
 		return
 	}
 
-	var retryRemaining = 3
+	const maxAttempts = 3
 	var parentErr error
-	for retryRemaining > 0 {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		retryDelay := time.Duration(attempt) * 250 * time.Millisecond
+
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestUrl, bytes.NewReader(submissionBody))
 		if err != nil {
 			parentErr = fmt.Errorf("creating submission request: %w", err)
 			slog.ErrorContext(ctx, "creating submission request", slog.String("error", err.Error()))
-			retryRemaining--
-			time.Sleep(time.Millisecond * 10)
+			if attempt < maxAttempts {
+				time.Sleep(retryDelay)
+			}
 			continue
 		}
 		request.Header.Set("Content-Type", "application/json")
@@ -331,21 +351,22 @@ func (c *Checker) sendMonitorSubmission(ctx context.Context, submission CheckerS
 		if err != nil {
 			parentErr = fmt.Errorf("sending submission request: %w", err)
 			slog.ErrorContext(ctx, "sending submission request", slog.String("error", err.Error()))
-			retryRemaining--
-			time.Sleep(time.Millisecond * 10)
+			if attempt < maxAttempts {
+				time.Sleep(retryDelay)
+			}
 			continue
 		}
-		defer func() {
-			if response.Body != nil {
-				_ = response.Body.Close()
-			}
-		}()
+
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
 
 		if response.StatusCode != http.StatusOK {
 			parentErr = fmt.Errorf("received non-200 status code %d", response.StatusCode)
 			slog.ErrorContext(ctx, "submission request failed", slog.String("error", parentErr.Error()))
-			retryRemaining--
-			time.Sleep(time.Millisecond * 10)
+			if attempt < maxAttempts {
+				time.Sleep(retryDelay)
+			}
 			continue
 		}
 
