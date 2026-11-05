@@ -49,6 +49,34 @@ func TestCheckerRegisterToUpstreamIncludesCheckerName(t *testing.T) {
 	}
 }
 
+func TestCheckerStopWaitsForInFlightSubmissions(t *testing.T) {
+	checker, err := NewChecker(CheckerOptions{})
+	if err != nil {
+		t.Fatalf("failed to create checker: %v", err)
+	}
+
+	checker.submissions.Add(1)
+	stopped := make(chan struct{})
+	go func() {
+		_ = checker.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned before the in-flight submission finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	checker.submissions.Done()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after the in-flight submission finished")
+	}
+}
+
 func TestCheckerSendMonitorSubmissionRetries(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
