@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -13,23 +13,30 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/getsentry/sentry-go/attribute"
+	"github.com/guregu/null/v5"
 	"gocloud.dev/pubsub"
 )
 
+const (
+	rawIngestBatchSize   = 100
+	rawIngestBatchWindow = 100 * time.Millisecond
+)
+
 // IngesterWorker is responsible for ingesting raw `monitor_historical`
-// and create daily aggregate.
+// and creating hourly and daily aggregates.
 type IngesterWorker struct {
-	db            *sql.DB
+	db            *PostgresStore
 	subscriber    *pubsub.Subscription
 	monitorConfig MonitorConfig
 	datasetConfig DatasetConfig
 	shutdown      chan struct{}
 
-	dirtyAggregationMu    sync.Mutex
-	dirtyAggregationTasks map[string]aggregationTask
+	dirtyAggregationMu       sync.Mutex
+	dirtyAggregationTasks    map[string]aggregationTask
+	dirtyHourAggregationTask map[string]hourAggregationTask
 }
 
-func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfig MonitorConfig, datasetConfig DatasetConfig) *IngesterWorker {
+func NewIngesterWorker(db *PostgresStore, subscriber *pubsub.Subscription, monitorConfig MonitorConfig, datasetConfig DatasetConfig) *IngesterWorker {
 	return &IngesterWorker{
 		db:            db,
 		subscriber:    subscriber,
@@ -37,13 +44,19 @@ func NewIngesterWorker(db *sql.DB, subscriber *pubsub.Subscription, monitorConfi
 		datasetConfig: datasetConfig,
 		shutdown:      make(chan struct{}),
 
-		dirtyAggregationTasks: make(map[string]aggregationTask),
+		dirtyAggregationTasks:    make(map[string]aggregationTask),
+		dirtyHourAggregationTask: make(map[string]hourAggregationTask),
 	}
 }
 
 type aggregationTask struct {
 	monitorID string
 	date      time.Time
+}
+
+type hourAggregationTask struct {
+	monitorID string
+	hour      time.Time
 }
 
 func (w *IngesterWorker) findMonitorConfig(monitorID string) (Monitor, bool) {
@@ -54,22 +67,6 @@ func (w *IngesterWorker) findMonitorConfig(monitorID string) (Monitor, bool) {
 	}
 
 	return Monitor{}, false
-}
-
-func buildSuccessCountExpression(monitorConfig Monitor) (string, []any) {
-	switch monitorConfig.EffectiveType() {
-	case MonitorTypeHTTP:
-		expectedStatusCodes := monitorConfig.EffectiveHTTP().ExpectedStatusCodes
-		placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(expectedStatusCodes)), ", ")
-		args := make([]any, 0, len(expectedStatusCodes))
-		for _, statusCode := range expectedStatusCodes {
-			args = append(args, statusCode)
-		}
-
-		return fmt.Sprintf("CASE WHEN status_code IN (%s) THEN 1 ELSE 0 END", placeholders), args
-	default:
-		return "CASE WHEN success THEN 1 ELSE 0 END", nil
-	}
 }
 
 func (w *IngesterWorker) determineHistoricalSuccess(monitorID string, probeType string, submission CheckerSubmissionRequest) bool {
@@ -84,10 +81,44 @@ func (w *IngesterWorker) determineHistoricalSuccess(monitorID string, probeType 
 	return submission.Success
 }
 
+func (w *IngesterWorker) buildHistoricalRow(request CheckerSubmissionRequest, region string) MonitorHistorical {
+	probeType := request.ProbeType
+	if probeType == "" {
+		probeType = string(MonitorTypeHTTP)
+	}
+	success := w.determineHistoricalSuccess(request.MonitorID, probeType, request)
+
+	return MonitorHistorical{
+		MonitorID:                 request.MonitorID,
+		Region:                    region,
+		ProbeType:                 probeType,
+		Success:                   success,
+		FailureReason:             request.FailureReason,
+		StatusCode:                request.StatusCode,
+		LatencyMs:                 int(request.LatencyMs),
+		ResponseBody:              request.ResponseBody,
+		TlsVersion:                request.TlsVersion,
+		TlsCipher:                 request.TlsCipher,
+		TlsExpiry:                 request.TlsExpiry,
+		TlsCertNotBefore:          request.TlsCertInfo.NotBefore,
+		TlsCertIssuer:             request.TlsCertInfo.Issuer,
+		TlsCertSubject:            request.TlsCertInfo.Subject,
+		TlsCertDN:                 request.TlsCertInfo.DN,
+		TlsCertFingerprint:        request.TlsCertInfo.Fingerprint,
+		TlsCertIsExpired:          request.TlsCertInfo.IsExpired,
+		TimingConnAcquiredMs:      null.IntFrom(request.Timings.ConnAcquiredMs),
+		TimingFirstResponseByteMs: null.IntFrom(request.Timings.FirstResponseByteMs),
+		TimingDNSLookupStartMs:    null.IntFrom(request.Timings.DNSLookupStartMs),
+		TimingDNSLookupDoneMs:     null.IntFrom(request.Timings.DNSLookupDoneMs),
+		TimingTLSHandshakeStartMs: null.IntFrom(request.Timings.TLSHandshakeStartMs),
+		TimingTLSHandshakeDoneMs:  null.IntFrom(request.Timings.TLSHandshakeDoneMs),
+		CreatedAt:                 normalizeRawTimestamp(request.Timestamp),
+	}
+}
+
 // Start begins the ingestion process, listening for new messages.
 // It is a blocking call.
 func (w *IngesterWorker) Start() error {
-	// Start periodic aggregation in a separate goroutine
 	go w.runPeriodicAggregation()
 
 	for {
@@ -95,67 +126,27 @@ func (w *IngesterWorker) Start() error {
 		case <-w.shutdown:
 			return nil
 		default:
-			ctx, cancel := context.WithCancel(sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone()))
-
-			message, err := w.subscriber.Receive(ctx)
-			if err != nil {
-				slog.ErrorContext(ctx, "receiving message for ingest queue", slog.String("error", err.Error()))
-				time.Sleep(time.Millisecond * 10)
-				cancel()
-				continue
-			}
-
-			span := sentry.StartTransaction(ctx, "ingester.process_submission", sentry.WithOpName("task.ingester.process"), sentry.WithTransactionSource(sentry.SourceCustom))
-			ctx = span.Context()
-
-			// Process the message here.
-			var request CheckerSubmissionRequest
-			if err := json.Unmarshal(message.Body, &request); err != nil {
-				slog.ErrorContext(ctx, "unmarshaling ingest message", slog.String("error", err.Error()))
-				if message.Nackable() {
-					message.Nack()
-				} else {
-					message.Ack()
-				}
-				span.Finish()
-				cancel()
-				continue
-			}
-
-			var region = "default"
-			if message.Metadata != nil {
-				if r, ok := message.Metadata["region"]; ok {
-					region = r
-				}
-			}
-
-			span.SetData("eyrie.monitor_id", request.MonitorID)
-			span.SetData("eyrie.region", region)
-
-			if err := w.ingestMonitorHistorical(ctx, request, region); err != nil {
-				if hub := sentry.GetHubFromContext(ctx); hub != nil {
-					hub.Scope().SetTag("eyrie.monitor_id", request.MonitorID)
-					hub.Scope().SetTag("eyrie.region", region)
-					hub.CaptureException(fmt.Errorf("ingesting monitor historical: %w", err))
-				}
-				slog.ErrorContext(ctx, "ingesting monitor historical", slog.String("error", err.Error()))
-				// The insert is idempotent (ON CONFLICT DO NOTHING), so a
-				// redelivery after a transient database failure is safe.
-				if message.Nackable() {
-					message.Nack()
-				} else {
-					message.Ack()
-				}
-				time.Sleep(100 * time.Millisecond)
-				span.Finish()
-				cancel()
-				continue
-			}
-
-			message.Ack()
-			span.Finish()
-			cancel()
 		}
+
+		messages, err := w.receiveBatch()
+		if err != nil {
+			select {
+			case <-w.shutdown:
+				return nil
+			default:
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				continue
+			}
+			slog.Error("receiving messages for ingest queue", slog.String("error", err.Error()))
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if len(messages) == 0 {
+			continue
+		}
+
+		w.processBatch(messages)
 	}
 }
 
@@ -164,16 +155,140 @@ func (w *IngesterWorker) Stop() error {
 	return nil
 }
 
-// runPeriodicAggregation runs the aggregation process every minute
+func (w *IngesterWorker) receiveBatch() ([]*pubsub.Message, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	message, err := w.subscriber.Receive(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	batch := []*pubsub.Message{message}
+	timer := time.NewTimer(rawIngestBatchWindow)
+	defer timer.Stop()
+
+	for len(batch) < rawIngestBatchSize {
+		select {
+		case <-w.shutdown:
+			return batch, nil
+		case <-timer.C:
+			return batch, nil
+		default:
+		}
+
+		receiveCtx, receiveCancel := context.WithTimeout(ctx, rawIngestBatchWindow)
+		next, err := w.subscriber.Receive(receiveCtx)
+		receiveCancel()
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return batch, nil
+			}
+			return batch, err
+		}
+		batch = append(batch, next)
+	}
+
+	return batch, nil
+}
+
+type pendingRawSubmission struct {
+	message   *pubsub.Message
+	row       MonitorHistorical
+	probeType string
+	region    string
+}
+
+func (w *IngesterWorker) processBatch(messages []*pubsub.Message) {
+	ctx := sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone())
+	span := sentry.StartTransaction(ctx, "ingester.process_batch", sentry.WithOpName("task.ingester.process_batch"), sentry.WithTransactionSource(sentry.SourceCustom))
+	ctx = span.Context()
+	defer span.Finish()
+
+	span.SetData("eyrie.batch_size", len(messages))
+
+	pending := make([]pendingRawSubmission, 0, len(messages))
+	for _, message := range messages {
+		var request CheckerSubmissionRequest
+		if err := json.Unmarshal(message.Body, &request); err != nil {
+			slog.ErrorContext(ctx, "unmarshaling ingest message", slog.String("error", err.Error()))
+			if message.Nackable() {
+				message.Nack()
+			} else {
+				message.Ack()
+			}
+			continue
+		}
+
+		region := "default"
+		if message.Metadata != nil {
+			if r, ok := message.Metadata["region"]; ok {
+				region = r
+			}
+		}
+
+		row := w.buildHistoricalRow(request, region)
+		pending = append(pending, pendingRawSubmission{
+			message:   message,
+			row:       row,
+			probeType: row.ProbeType,
+			region:    region,
+		})
+	}
+
+	if len(pending) == 0 {
+		return
+	}
+
+	rows := make([]MonitorHistorical, len(pending))
+	for i := range pending {
+		rows[i] = pending[i].row
+	}
+
+	outcomes, err := w.db.InsertMonitorHistoricalBatch(ctx, rows, w.datasetConfig.PartitionLookaheadDays)
+	if err != nil {
+		if hub := sentry.GetHubFromContext(ctx); hub != nil {
+			hub.CaptureException(fmt.Errorf("ingesting monitor historical batch: %w", err))
+		}
+		slog.ErrorContext(ctx, "ingesting monitor historical batch", slog.String("error", err.Error()), slog.Int("batch_size", len(pending)))
+		for _, item := range pending {
+			if item.message.Nackable() {
+				item.message.Nack()
+			} else {
+				item.message.Ack()
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		return
+	}
+
+	for i, item := range pending {
+		switch outcomes[i] {
+		case RawRejectedOld, RawRejectedFuture:
+			slog.WarnContext(ctx, "rejecting historical submission with time drift",
+				slog.String("monitor_id", item.row.MonitorID),
+				slog.String("region", item.region),
+				slog.Time("submitted_at", item.row.CreatedAt),
+				slog.Duration("time_drift", time.Since(item.row.CreatedAt)))
+		default:
+			w.enqueueAggregationTask(item.row.MonitorID, item.row.CreatedAt)
+			sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.ingested", 1, sentry.WithAttributes(attribute.String("probe_type", item.probeType), attribute.String("region", item.region)))
+			if item.row.LatencyMs > 0 {
+				sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.submissions.ingested_latency", float64(item.row.LatencyMs), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", item.probeType), attribute.String("region", item.region)))
+			}
+		}
+
+		item.message.Ack()
+	}
+}
+
+// runPeriodicAggregation runs the aggregation process every minute.
 func (w *IngesterWorker) runPeriodicAggregation() {
-	const aggregationInterval = 1 * time.Minute
+	const aggregationInterval = time.Minute
 	ticker := time.NewTicker(aggregationInterval)
 	defer ticker.Stop()
 
-	// Seed the configured retention window on startup so missed aggregate work is
-	// reconciled after longer outages without reintroducing the historical rescan
-	// on every aggregation tick.
-	w.seedRecentAggregationTasks(w.aggregationSeedLookback())
+	w.seedCurrentAggregationTasks()
 	w.aggregateDirtyMonitors()
 
 	for {
@@ -195,15 +310,41 @@ func aggregationTaskKey(monitorID string, date time.Time) string {
 	return fmt.Sprintf("%s|%s", monitorID, normalizeAggregationDate(date).Format("2006-01-02"))
 }
 
-func (w *IngesterWorker) aggregationSeedLookback() time.Duration {
-	days := w.datasetConfig.RetentionDays
-	if days <= 0 {
-		days = 30
+func hourAggregationTaskKey(monitorID string, hour time.Time) string {
+	return fmt.Sprintf("%s|%s", monitorID, hour.UTC().Truncate(time.Hour).Format(time.RFC3339))
+}
+
+// seedCurrentAggregationTasks recomputes only the current hour and current day
+// on startup. Missed windows after a longer outage are intentionally not
+// backfilled; the service resumes with fresh data.
+func (w *IngesterWorker) seedCurrentAggregationTasks() {
+	now := time.Now().UTC()
+	for _, monitor := range w.monitorConfig.Monitors {
+		w.enqueueAggregationTask(monitor.ID, now)
 	}
-	return time.Duration(days) * 24 * time.Hour
 }
 
 func (w *IngesterWorker) enqueueAggregationTask(monitorID string, date time.Time) {
+	w.enqueueHourAggregationTask(monitorID, date)
+	w.enqueueDayAggregationTask(monitorID, date)
+}
+
+func (w *IngesterWorker) enqueueHourAggregationTask(monitorID string, date time.Time) {
+	task := hourAggregationTask{
+		monitorID: monitorID,
+		hour:      date.UTC().Truncate(time.Hour),
+	}
+
+	w.dirtyAggregationMu.Lock()
+	defer w.dirtyAggregationMu.Unlock()
+
+	if w.dirtyHourAggregationTask == nil {
+		w.dirtyHourAggregationTask = make(map[string]hourAggregationTask)
+	}
+	w.dirtyHourAggregationTask[hourAggregationTaskKey(task.monitorID, task.hour)] = task
+}
+
+func (w *IngesterWorker) enqueueDayAggregationTask(monitorID string, date time.Time) {
 	task := aggregationTask{
 		monitorID: monitorID,
 		date:      normalizeAggregationDate(date),
@@ -216,6 +357,30 @@ func (w *IngesterWorker) enqueueAggregationTask(monitorID string, date time.Time
 		w.dirtyAggregationTasks = make(map[string]aggregationTask)
 	}
 	w.dirtyAggregationTasks[aggregationTaskKey(task.monitorID, task.date)] = task
+}
+
+func (w *IngesterWorker) drainHourAggregationTasks() []hourAggregationTask {
+	w.dirtyAggregationMu.Lock()
+	defer w.dirtyAggregationMu.Unlock()
+
+	if len(w.dirtyHourAggregationTask) == 0 {
+		return nil
+	}
+
+	tasks := make([]hourAggregationTask, 0, len(w.dirtyHourAggregationTask))
+	for _, task := range w.dirtyHourAggregationTask {
+		tasks = append(tasks, task)
+	}
+	clear(w.dirtyHourAggregationTask)
+
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].hour.Equal(tasks[j].hour) {
+			return tasks[i].monitorID < tasks[j].monitorID
+		}
+		return tasks[i].hour.Before(tasks[j].hour)
+	})
+
+	return tasks
 }
 
 func (w *IngesterWorker) drainAggregationTasks() []aggregationTask {
@@ -242,70 +407,13 @@ func (w *IngesterWorker) drainAggregationTasks() []aggregationTask {
 	return tasks
 }
 
-// seedRecentAggregationTasks backfills a small recent window after startup so
-// the worker can recover from restarts without reprocessing the full history on
-// every aggregation tick.
-func (w *IngesterWorker) seedRecentAggregationTasks(lookback time.Duration) {
-	ctx := sentry.SetHubOnContext(context.Background(), sentry.CurrentHub().Clone())
-	span := sentry.StartTransaction(ctx, "ingester.seed_aggregation_tasks", sentry.WithOpName("task.ingester.aggregate_seed"), sentry.WithTransactionSource(sentry.SourceCustom))
-	ctx = span.Context()
-	defer span.Finish()
-
-	conn, err := w.db.Conn(ctx)
-	if err != nil {
-		slog.ErrorContext(ctx, "getting db connection for aggregation seed", slog.String("error", err.Error()))
-		return
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT DISTINCT 
-			monitor_id, 
-			CAST(created_at AS DATE) AS date
-		FROM monitor_historical
-		WHERE created_at >= ?
-	`, time.Now().UTC().Add(-lookback))
-	if err != nil {
-		slog.ErrorContext(ctx, "querying monitor IDs and dates for aggregation seed", slog.String("error", err.Error()))
-		return
-	}
-	defer rows.Close()
-
-	seeded := 0
-	for rows.Next() {
-		var monitorID string
-		var dateStr string
-		if err := rows.Scan(&monitorID, &dateStr); err != nil {
-			slog.ErrorContext(ctx, "scanning monitor ID and date", slog.String("error", err.Error()))
-			continue
-		}
-
-		date, err := parseAggregationDate(dateStr)
-		if err != nil {
-			slog.ErrorContext(ctx, "parsing date", slog.String("error", err.Error()), slog.String("date", dateStr))
-			continue
-		}
-
-		w.enqueueAggregationTask(monitorID, date)
-		seeded++
-	}
-
-	if err := rows.Err(); err != nil {
-		slog.ErrorContext(ctx, "iterating aggregation seed rows", slog.String("error", err.Error()))
-		return
-	}
-
-	if seeded > 0 {
-		slog.InfoContext(ctx, "seeded recent aggregation tasks", slog.Int("task_count", seeded))
-	}
-}
-
-// aggregateDirtyMonitors aggregates only monitor/date pairs that changed since
-// the last flush. This keeps aggregation work proportional to new submissions
-// instead of repeatedly rescanning historical data.
+// aggregateDirtyMonitors aggregates only monitor/time pairs that changed since
+// the last flush. Hourly tasks are processed before daily tasks so daily
+// rollups are always derived from up-to-date hourly rows.
 func (w *IngesterWorker) aggregateDirtyMonitors() {
-	tasks := w.drainAggregationTasks()
-	if len(tasks) == 0 {
+	hourTasks := w.drainHourAggregationTasks()
+	dayTasks := w.drainAggregationTasks()
+	if len(hourTasks) == 0 && len(dayTasks) == 0 {
 		return
 	}
 
@@ -315,12 +423,30 @@ func (w *IngesterWorker) aggregateDirtyMonitors() {
 	ctx = span.Context()
 	defer span.Finish()
 
-	slog.InfoContext(ctx, "starting aggregation", slog.Int("task_count", len(tasks)))
-	sentry.NewMeter(context.Background()).WithCtx(ctx).Gauge("eyrie.ingester.aggregation.tasks", float64(len(tasks)))
+	slog.InfoContext(ctx, "starting aggregation", slog.Int("hour_task_count", len(hourTasks)), slog.Int("day_task_count", len(dayTasks)))
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Gauge("eyrie.ingester.aggregation.hour_tasks", float64(len(hourTasks)))
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Gauge("eyrie.ingester.aggregation.tasks", float64(len(dayTasks)))
 
-	for _, task := range tasks {
+	for _, task := range hourTasks {
+		if err := w.aggregateHourlyMonitorHistorical(ctx, task.monitorID, task.hour); err != nil {
+			w.enqueueHourAggregationTask(task.monitorID, task.hour)
+			w.enqueueDayAggregationTask(task.monitorID, task.hour)
+
+			if hub := sentry.GetHubFromContext(ctx); hub != nil {
+				hub.Scope().SetTag("eyrie.monitor_id", task.monitorID)
+				hub.Scope().SetTag("eyrie.hour", task.hour.Format(time.RFC3339))
+				hub.CaptureException(fmt.Errorf("aggregating hourly monitor historical: %w", err))
+			}
+			slog.ErrorContext(ctx, "aggregating hourly monitor historical",
+				slog.String("monitor_id", task.monitorID),
+				slog.String("hour", task.hour.Format(time.RFC3339)),
+				slog.String("error", err.Error()))
+		}
+	}
+
+	for _, task := range dayTasks {
 		if err := w.aggregateDailyMonitorHistorical(ctx, task.monitorID, task.date); err != nil {
-			w.enqueueAggregationTask(task.monitorID, task.date)
+			w.enqueueDayAggregationTask(task.monitorID, task.date)
 
 			if hub := sentry.GetHubFromContext(ctx); hub != nil {
 				hub.Scope().SetTag("eyrie.monitor_id", task.monitorID)
@@ -335,7 +461,7 @@ func (w *IngesterWorker) aggregateDirtyMonitors() {
 	}
 
 	sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.ingester.aggregation.duration", float64(time.Since(aggregationStartedAt).Milliseconds()), sentry.WithUnit(sentry.UnitMillisecond))
-	slog.InfoContext(ctx, "aggregation completed", slog.Int("task_count", len(tasks)))
+	slog.InfoContext(ctx, "aggregation completed", slog.Int("hour_task_count", len(hourTasks)), slog.Int("day_task_count", len(dayTasks)))
 }
 
 func parseAggregationDate(raw string) (time.Time, error) {
@@ -355,111 +481,40 @@ func (w *IngesterWorker) ingestMonitorHistorical(ctx context.Context, submission
 	ctx = span.Context()
 	defer span.Finish()
 
-	conn, err := w.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	probeType := submission.ProbeType
-	if probeType == "" {
-		probeType = string(MonitorTypeHTTP)
-	}
-	success := w.determineHistoricalSuccess(submission.MonitorID, probeType, submission)
-
-	// Insert raw monitor historical data
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO
-			monitor_historical
-			(
-				monitor_id, 
-				region, 
-				probe_type,
-				success,
-				failure_reason,
-				status_code, 
-				latency_ms, 
-				response_body, 
-				tls_version, 
-				tls_cipher, 
-				tls_expiry,
-				tls_cert_not_before,
-				tls_cert_issuer,
-				tls_cert_subject,
-				tls_cert_dn,
-				tls_cert_fingerprint,
-				tls_cert_is_expired,
-				timing_conn_acquired_ms,
-				timing_first_response_byte_ms,
-				timing_dns_lookup_start_ms,
-				timing_dns_lookup_done_ms,
-				timing_tls_handshake_start_ms,
-				timing_tls_handshake_done_ms, 
-				created_at
-			)
-		VALUES
-			(
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?,
-				?
-			)
-		ON CONFLICT DO NOTHING
-	`,
-		submission.MonitorID,
-		region,
-		probeType,
-		success,
-		submission.FailureReason,
-		submission.StatusCode,
-		submission.LatencyMs,
-		submission.ResponseBody,
-		submission.TlsVersion,
-		submission.TlsCipher,
-		submission.TlsExpiry,
-		submission.TlsCertInfo.NotBefore,
-		submission.TlsCertInfo.Issuer,
-		submission.TlsCertInfo.Subject,
-		submission.TlsCertInfo.DN,
-		submission.TlsCertInfo.Fingerprint,
-		submission.TlsCertInfo.IsExpired,
-		submission.Timings.ConnAcquiredMs,
-		submission.Timings.FirstResponseByteMs,
-		submission.Timings.DNSLookupStartMs,
-		submission.Timings.DNSLookupDoneMs,
-		submission.Timings.TLSHandshakeStartMs,
-		submission.Timings.TLSHandshakeDoneMs,
-		submission.Timestamp,
-	)
+	row := w.buildHistoricalRow(submission, region)
+	outcome, err := w.db.InsertMonitorHistorical(ctx, row, w.datasetConfig.PartitionLookaheadDays)
 	if err != nil {
 		return fmt.Errorf("inserting monitor historical: %w", err)
 	}
 
-	w.enqueueAggregationTask(submission.MonitorID, submission.Timestamp)
+	switch outcome {
+	case RawRejectedOld, RawRejectedFuture:
+		slog.WarnContext(ctx, "rejecting historical submission with time drift",
+			slog.String("monitor_id", row.MonitorID),
+			slog.String("region", region),
+			slog.Time("submitted_at", row.CreatedAt),
+			slog.Duration("time_drift", time.Since(row.CreatedAt)))
+		return nil
+	}
 
-	sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.ingested", 1, sentry.WithAttributes(attribute.String("probe_type", probeType), attribute.String("region", region)))
-	if submission.LatencyMs > 0 {
-		sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.submissions.ingested_latency", float64(submission.LatencyMs), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", probeType), attribute.String("region", region)))
+	w.enqueueAggregationTask(row.MonitorID, row.CreatedAt)
+
+	sentry.NewMeter(context.Background()).WithCtx(ctx).Count("eyrie.monitor.submissions.ingested", 1, sentry.WithAttributes(attribute.String("probe_type", row.ProbeType), attribute.String("region", region)))
+	if row.LatencyMs > 0 {
+		sentry.NewMeter(context.Background()).WithCtx(ctx).Distribution("eyrie.monitor.submissions.ingested_latency", float64(row.LatencyMs), sentry.WithUnit(sentry.UnitMillisecond), sentry.WithAttributes(attribute.String("probe_type", row.ProbeType), attribute.String("region", region)))
+	}
+	return nil
+}
+
+func (w *IngesterWorker) aggregateHourlyMonitorHistorical(ctx context.Context, monitorID string, hour time.Time) error {
+	monitorConfig, found := w.findMonitorConfig(monitorID)
+	if !found {
+		return nil
+	}
+
+	hour = hour.UTC().Truncate(time.Hour)
+	if err := w.db.AggregateHourly(ctx, monitorID, hour, hour.Add(time.Hour), successCriteriaForMonitor(monitorConfig)); err != nil {
+		return fmt.Errorf("aggregating hourly monitor historical: %w", err)
 	}
 	return nil
 }
@@ -476,61 +531,12 @@ func (w *IngesterWorker) aggregateDailyMonitorHistorical(ctx context.Context, mo
 		return nil
 	}
 
-	conn, err := w.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("getting db connection: %w", err)
+	day := utcDayStart(date)
+	if err := w.db.AggregateHourly(ctx, monitorID, day, day.AddDate(0, 0, 1), successCriteriaForMonitor(monitorConfig)); err != nil {
+		return fmt.Errorf("aggregating hourly monitor historical for day: %w", err)
 	}
-	defer conn.Close()
-
-	successCountExpression, successCountArgs := buildSuccessCountExpression(monitorConfig)
-	dailyAggregateArgs := append(append([]any{}, successCountArgs...), monitorID, date.Format("2006-01-02"))
-	_, err = conn.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO monitor_historical_daily_aggregate (monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
-		SELECT
-			monitor_id,
-			DATE(created_at) AS date,
-			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
-			MIN(latency_ms) AS min_latency_ms,
-			MAX(latency_ms) AS max_latency_ms,
-			CAST(SUM(%s) * 100 / COUNT(*) AS SMALLINT) AS success_rate
-		FROM monitor_historical
-		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
-		GROUP BY monitor_id, DATE(created_at)
-		ON CONFLICT (monitor_id, date) DO UPDATE
-		SET
-			avg_latency_ms = EXCLUDED.avg_latency_ms,
-			min_latency_ms = EXCLUDED.min_latency_ms,
-			max_latency_ms = EXCLUDED.max_latency_ms,
-			success_rate = EXCLUDED.success_rate
-	`, successCountExpression), dailyAggregateArgs...)
-	if err != nil {
-		return fmt.Errorf("upserting daily aggregate monitor historical: %w", err)
+	if err := w.db.AggregateDaily(ctx, monitorID, day); err != nil {
+		return fmt.Errorf("aggregating daily monitor historical: %w", err)
 	}
-
-	regionAggregateArgs := append(append([]any{}, successCountArgs...), monitorID, date.Format("2006-01-02"))
-	_, err = conn.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO monitor_historical_region_daily_aggregate (monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate)
-		SELECT
-			monitor_id,
-			region,
-			DATE(created_at) AS date,
-			CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms,
-			MIN(latency_ms) AS min_latency_ms,
-			MAX(latency_ms) AS max_latency_ms,
-			CAST(SUM(%s) * 100 / COUNT(*) AS SMALLINT) AS success_rate
-		FROM monitor_historical
-		WHERE monitor_id = ? AND CAST(created_at AS DATE) = ?
-		GROUP BY monitor_id, region, DATE(created_at)
-		ON CONFLICT (monitor_id, region, date) DO UPDATE
-		SET
-			avg_latency_ms = EXCLUDED.avg_latency_ms,
-			min_latency_ms = EXCLUDED.min_latency_ms,
-			max_latency_ms = EXCLUDED.max_latency_ms,
-			success_rate = EXCLUDED.success_rate
-	`, successCountExpression), regionAggregateArgs...)
-	if err != nil {
-		return fmt.Errorf("upserting region daily aggregate monitor historical: %w", err)
-	}
-
 	return nil
 }

@@ -35,6 +35,10 @@ func partitionName(table string, day time.Time) string {
 	return fmt.Sprintf("%s_p%s", table, utcDayStart(day).Format("20060102"))
 }
 
+func partitionDayCacheKey(day time.Time) string {
+	return "all|" + utcDayStart(day).Format("20060102")
+}
+
 func partitionBounds(spec partitionSpec, day time.Time) (string, string) {
 	start := utcDayStart(day)
 	end := start.AddDate(0, 0, 1)
@@ -126,12 +130,16 @@ func (s *PostgresStore) EnsurePartitions(ctx context.Context, now time.Time, loo
 
 	created := 0
 	createdNames := make([]string, 0)
+	ensuredDays := make([]time.Time, 0)
 	for _, spec := range partitionSpecs {
 		existing, err := listPartitionNames(ctx, tx, spec.table)
 		if err != nil {
 			return 0, fmt.Errorf("listing partitions for %s: %w", spec.table, err)
 		}
 		for day := start; day.Before(end); day = day.AddDate(0, 0, 1) {
+			if spec.table == partitionSpecs[0].table {
+				ensuredDays = append(ensuredDays, day)
+			}
 			name := partitionName(spec.table, day)
 			if _, ok := existing[name]; ok {
 				continue
@@ -150,6 +158,9 @@ func (s *PostgresStore) EnsurePartitions(ctx context.Context, now time.Time, loo
 	}
 	for _, name := range createdNames {
 		s.markPartitionKnown(name)
+	}
+	for _, day := range ensuredDays {
+		s.markPartitionKnown(partitionDayCacheKey(day))
 	}
 
 	return created, nil
@@ -172,8 +183,7 @@ func (s *PostgresStore) EnsureRawPartition(ctx context.Context, at time.Time, lo
 		return ErrHistoricalDataTooFuture
 	}
 
-	name := partitionName("monitor_historical", day)
-	if s.partitionKnown(name) {
+	if s.partitionKnown(partitionDayCacheKey(day)) {
 		return nil
 	}
 
@@ -187,20 +197,28 @@ func (s *PostgresStore) EnsureRawPartition(ctx context.Context, at time.Time, lo
 		return fmt.Errorf("acquiring raw partition lock: %w", err)
 	}
 
-	exists, err := partitionExists(ctx, tx, name)
-	if err != nil {
-		return fmt.Errorf("checking raw partition %s: %w", name, err)
-	}
-	if !exists {
-		if _, err := tx.Exec(ctx, createPartitionSQL(partitionSpecs[0], day)); err != nil {
-			return fmt.Errorf("creating raw partition %s: %w", name, err)
+	ensuredNames := make([]string, 0, len(partitionSpecs))
+	for _, spec := range partitionSpecs {
+		name := partitionName(spec.table, day)
+		exists, err := partitionExists(ctx, tx, name)
+		if err != nil {
+			return fmt.Errorf("checking partition %s: %w", name, err)
 		}
+		if !exists {
+			if _, err := tx.Exec(ctx, createPartitionSQL(spec, day)); err != nil {
+				return fmt.Errorf("creating partition %s: %w", name, err)
+			}
+		}
+		ensuredNames = append(ensuredNames, name)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("committing raw partition transaction: %w", err)
 	}
 
-	s.markPartitionKnown(name)
+	for _, name := range ensuredNames {
+		s.markPartitionKnown(name)
+	}
+	s.markPartitionKnown(partitionDayCacheKey(day))
 	return nil
 }
 
@@ -225,6 +243,7 @@ func (s *PostgresStore) DropExpiredPartitions(ctx context.Context, now time.Time
 
 	dropped := 0
 	droppedNames := make([]string, 0)
+	droppedDays := make(map[time.Time]struct{})
 	for _, spec := range partitionSpecs {
 		existing, err := listPartitionNames(ctx, tx, spec.table)
 		if err != nil {
@@ -239,6 +258,7 @@ func (s *PostgresStore) DropExpiredPartitions(ctx context.Context, now time.Time
 				return 0, fmt.Errorf("dropping expired partition %s: %w", name, err)
 			}
 			droppedNames = append(droppedNames, name)
+			droppedDays[day] = struct{}{}
 			dropped++
 		}
 	}
@@ -248,6 +268,9 @@ func (s *PostgresStore) DropExpiredPartitions(ctx context.Context, now time.Time
 	}
 	for _, name := range droppedNames {
 		s.forgetPartition(name)
+	}
+	for day := range droppedDays {
+		s.forgetPartition(partitionDayCacheKey(day))
 	}
 
 	return dropped, nil

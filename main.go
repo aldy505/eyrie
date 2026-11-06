@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"log/slog"
@@ -12,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/duckdb/duckdb-go/v2"
 	"github.com/getsentry/sentry-go"
 	sentryhttpclient "github.com/getsentry/sentry-go/httpclient"
 	"github.com/goccy/go-yaml"
@@ -103,16 +101,19 @@ func main() {
 		}
 		defer sentry.Flush(2 * time.Second)
 
-		connector, err := duckdb.NewConnector(serverConfig.Database.Path, nil)
+		store, err := OpenPostgresStore(ctx, serverConfig.Database)
 		if err != nil {
-			slog.Error("failed to create duckdb connector", slog.String("error", duckDBStartupRecoveryHint(serverConfig.Database.Path, err).Error()))
+			slog.Error("failed to open postgres database", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
 
-		db := sql.OpenDB(connector)
+		if err := MigratePostgres(ctx, store.pool, true); err != nil {
+			slog.Error("failed to migrate postgres database", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
 
-		if err := Migrate(db, ctx, true); err != nil {
-			slog.Error("failed to migrate database", slog.String("error", err.Error()))
+		if _, err := store.EnsurePartitions(ctx, time.Now().UTC(), serverConfig.Dataset.PartitionLookaheadDays); err != nil {
+			slog.Error("failed to ensure postgres partitions", slog.String("error", err.Error()))
 			os.Exit(1)
 		}
 
@@ -152,13 +153,13 @@ func main() {
 			os.Exit(1)
 		}
 
-		ingesterWorker := NewIngesterWorker(db, ingesterSubscriber, monitorConfig, serverConfig.Dataset)
-		processorWorker := NewProcessorWorker(db, processorSubscriber, alerterProducer, monitorConfig, serverConfig.Dataset)
+		ingesterWorker := NewIngesterWorker(store, ingesterSubscriber, monitorConfig, serverConfig.Dataset)
+		processorWorker := NewProcessorWorker(store, processorSubscriber, alerterProducer, monitorConfig, serverConfig.Dataset)
 		alerterWorker := NewAlerterWorker(alerterSubscriber, BuildAlerters(serverConfig))
-		cleanupWorker := NewCleanupWorker(db, serverConfig.Dataset)
+		cleanupWorker := NewCleanupWorker(store, serverConfig.Dataset)
 
 		srv, err := NewServer(ServerOptions{
-			Database:          db,
+			Database:          store,
 			ServerConfig:      serverConfig,
 			MonitorConfig:     monitorConfig,
 			ProcessorProducer: processorProducer,
@@ -227,12 +228,8 @@ func main() {
 				slog.Error("failed to shutdown ingester subscriber", slog.String("error", err.Error()))
 			}
 
-			if err := db.Close(); err != nil {
+			if err := store.Close(); err != nil {
 				slog.Error("failed to close database", slog.String("error", err.Error()))
-			}
-
-			if err := connector.Close(); err != nil {
-				slog.Error("failed to close database connector", slog.String("error", err.Error()))
 			}
 
 			slog.Info("graceful shutdown complete")

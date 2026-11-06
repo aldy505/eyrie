@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/subtle"
-	"database/sql"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -14,7 +13,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,23 +25,21 @@ import (
 	"github.com/guregu/null/v5"
 	"github.com/rs/cors"
 	"gocloud.dev/pubsub"
-	"golang.org/x/sync/semaphore"
 )
 
 type Server struct {
 	*http.Server
-	db                                  *sql.DB
+	db                                  *PostgresStore
 	serverConfig                        ServerConfig
 	monitorConfig                       MonitorConfig
 	processorProducer                   *pubsub.Topic
 	ingesterProducer                    *pubsub.Topic
-	duckDBReadLimiter                   *semaphore.Weighted
 	historicalDailyAggregateCache       uptimeAggregateCache[[]MonitorHistoricalDailyAggregate]
 	historicalRegionDailyAggregateCache uptimeAggregateCache[[]MonitorHistoricalRegionDailyAggregate]
 }
 
 type ServerOptions struct {
-	Database          *sql.DB
+	Database          *PostgresStore
 	ServerConfig      ServerConfig
 	MonitorConfig     MonitorConfig
 	ProcessorProducer *pubsub.Topic
@@ -54,18 +50,12 @@ type ServerOptions struct {
 var frontendFilesystem embed.FS
 
 func NewServer(options ServerOptions) (*Server, error) {
-	duckDBReadLimit := resolveDuckDBReadConcurrencyLimit(
-		options.ServerConfig.Database.ReadConcurrencyLimit,
-		runtime.GOMAXPROCS(0),
-	)
-
 	s := &Server{
 		db:                options.Database,
 		serverConfig:      options.ServerConfig,
 		monitorConfig:     options.MonitorConfig,
 		processorProducer: options.ProcessorProducer,
 		ingesterProducer:  options.IngesterProducer,
-		duckDBReadLimiter: semaphore.NewWeighted(duckDBReadLimit),
 	}
 
 	var err error
@@ -98,9 +88,9 @@ func NewServer(options ServerOptions) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /config", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.ConfigHandler)))
-	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.UptimeDataHandler))))
-	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.UptimeDataByRegionHandler))))
-	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.withDuckDBReadPermit(s.MonitorIncidentsHandler))))
+	mux.Handle("GET /uptime-data", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataHandler)))
+	mux.Handle("GET /uptime-data-by-region", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.UptimeDataByRegionHandler)))
+	mux.Handle("GET /monitor-incidents", corsMiddleware.Handler(sentryMiddleware.HandleFunc(s.MonitorIncidentsHandler)))
 	mux.Handle("POST /checker/register", sentryMiddleware.HandleFunc(s.CheckerRegistration))
 	mux.Handle("POST /checker/submit", sentryMiddleware.HandleFunc(s.CheckerSubmission))
 	if os.Getenv("ENABLE_PPROF_ENDPOINT") == "1" {
@@ -125,103 +115,16 @@ func NewServer(options ServerOptions) (*Server, error) {
 	return s, nil
 }
 
-func resolveDuckDBReadConcurrencyLimit(configured int, gomaxprocs int) int64 {
-	if configured > 0 {
-		return int64(configured)
-	}
-
-	derivedLimit := gomaxprocs / 2
-	if derivedLimit < 1 {
-		derivedLimit = 1
-	}
-
-	return int64(derivedLimit)
-}
-
 func aggregateCacheKey(monitorID string, day time.Time) string {
 	return monitorID + ":" + utcDayStart(day).Format("2006-01-02")
 }
 
 func (s *Server) loadHistoricalDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalDailyAggregate, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
-		FROM monitor_historical_daily_aggregate
-		WHERE monitor_id = ? AND date < ?
-		ORDER BY date ASC
-	`, monitorID, utcDayStart(beforeDate).Format("2006-01-02"))
-	if err != nil {
-		return nil, fmt.Errorf("querying historical daily aggregates: %w", err)
-	}
-	defer rows.Close()
-
-	var aggregates []MonitorHistoricalDailyAggregate
-	for rows.Next() {
-		var aggregate MonitorHistoricalDailyAggregate
-		if err := rows.Scan(
-			&aggregate.MonitorID,
-			&aggregate.Date,
-			&aggregate.AvgLatencyMs,
-			&aggregate.MinLatencyMs,
-			&aggregate.MaxLatencyMs,
-			&aggregate.SuccessRate,
-		); err != nil {
-			return nil, fmt.Errorf("scanning historical daily aggregate: %w", err)
-		}
-		aggregates = append(aggregates, aggregate)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating historical daily aggregates: %w", err)
-	}
-
-	return aggregates, nil
+	return s.db.DailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
 }
 
 func (s *Server) loadHistoricalDailyAggregatesForDate(ctx context.Context, monitorID string, day time.Time) ([]MonitorHistoricalDailyAggregate, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
-		FROM monitor_historical_daily_aggregate
-		WHERE monitor_id = ? AND date = ?
-		ORDER BY date ASC
-	`, monitorID, utcDayStart(day).Format("2006-01-02"))
-	if err != nil {
-		return nil, fmt.Errorf("querying current day daily aggregates: %w", err)
-	}
-	defer rows.Close()
-
-	var aggregates []MonitorHistoricalDailyAggregate
-	for rows.Next() {
-		var aggregate MonitorHistoricalDailyAggregate
-		if err := rows.Scan(
-			&aggregate.MonitorID,
-			&aggregate.Date,
-			&aggregate.AvgLatencyMs,
-			&aggregate.MinLatencyMs,
-			&aggregate.MaxLatencyMs,
-			&aggregate.SuccessRate,
-		); err != nil {
-			return nil, fmt.Errorf("scanning current day daily aggregate: %w", err)
-		}
-		aggregates = append(aggregates, aggregate)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating current day daily aggregates: %w", err)
-	}
-
-	return aggregates, nil
+	return s.db.DailyAggregatesForDate(ctx, monitorID, day)
 }
 
 func (s *Server) historicalDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalDailyAggregate, error) {
@@ -236,87 +139,11 @@ func (s *Server) historicalDailyAggregatesBeforeDate(ctx context.Context, monito
 }
 
 func (s *Server) loadHistoricalRegionDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
-		FROM monitor_historical_region_daily_aggregate
-		WHERE monitor_id = ? AND date < ?
-		ORDER BY date ASC
-	`, monitorID, utcDayStart(beforeDate).Format("2006-01-02"))
-	if err != nil {
-		return nil, fmt.Errorf("querying historical region daily aggregates: %w", err)
-	}
-	defer rows.Close()
-
-	var aggregates []MonitorHistoricalRegionDailyAggregate
-	for rows.Next() {
-		var aggregate MonitorHistoricalRegionDailyAggregate
-		if err := rows.Scan(
-			&aggregate.MonitorID,
-			&aggregate.Region,
-			&aggregate.Date,
-			&aggregate.AvgLatencyMs,
-			&aggregate.MinLatencyMs,
-			&aggregate.MaxLatencyMs,
-			&aggregate.SuccessRate,
-		); err != nil {
-			return nil, fmt.Errorf("scanning historical region daily aggregate: %w", err)
-		}
-		aggregates = append(aggregates, aggregate)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating historical region daily aggregates: %w", err)
-	}
-
-	return aggregates, nil
+	return s.db.RegionDailyAggregatesBeforeDate(ctx, monitorID, beforeDate)
 }
 
 func (s *Server) loadHistoricalRegionDailyAggregatesForDate(ctx context.Context, monitorID string, day time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id, region, date, avg_latency_ms, min_latency_ms, max_latency_ms, success_rate
-		FROM monitor_historical_region_daily_aggregate
-		WHERE monitor_id = ? AND date = ?
-		ORDER BY date ASC
-	`, monitorID, utcDayStart(day).Format("2006-01-02"))
-	if err != nil {
-		return nil, fmt.Errorf("querying current day region daily aggregates: %w", err)
-	}
-	defer rows.Close()
-
-	var aggregates []MonitorHistoricalRegionDailyAggregate
-	for rows.Next() {
-		var aggregate MonitorHistoricalRegionDailyAggregate
-		if err := rows.Scan(
-			&aggregate.MonitorID,
-			&aggregate.Region,
-			&aggregate.Date,
-			&aggregate.AvgLatencyMs,
-			&aggregate.MinLatencyMs,
-			&aggregate.MaxLatencyMs,
-			&aggregate.SuccessRate,
-		); err != nil {
-			return nil, fmt.Errorf("scanning current day region daily aggregate: %w", err)
-		}
-		aggregates = append(aggregates, aggregate)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating current day region daily aggregates: %w", err)
-	}
-
-	return aggregates, nil
+	return s.db.RegionDailyAggregatesForDate(ctx, monitorID, day)
 }
 
 func (s *Server) historicalRegionDailyAggregatesBeforeDate(ctx context.Context, monitorID string, beforeDate time.Time) ([]MonitorHistoricalRegionDailyAggregate, error) {
@@ -350,39 +177,6 @@ func (s *Server) CloseCaches() error {
 	return nil
 }
 
-func (s *Server) withDuckDBReadPermit(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.duckDBReadLimiter == nil {
-			next(w, r)
-			return
-		}
-
-		if err := s.acquireDuckDBReadPermit(r.Context()); err != nil {
-			if hub := sentry.GetHubFromContext(r.Context()); hub != nil {
-				hub.CaptureException(fmt.Errorf("acquiring duckdb read permit: %w", err))
-			}
-			slog.WarnContext(r.Context(), "request cancelled while waiting for duckdb read capacity", slog.String("error", err.Error()))
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(CommonErrorResponse{
-				Error: "request cancelled while waiting for database capacity",
-			})
-			return
-		}
-		defer s.duckDBReadLimiter.Release(1)
-
-		next(w, r)
-	}
-}
-
-func (s *Server) acquireDuckDBReadPermit(ctx context.Context) error {
-	if s.duckDBReadLimiter == nil {
-		return nil
-	}
-
-	return s.duckDBReadLimiter.Acquire(ctx, 1)
-}
-
 type CommonErrorResponse struct {
 	Error string `json:"error"`
 }
@@ -403,26 +197,26 @@ type UptimeDataHistorical struct {
 }
 
 type UptimeDataTLSInfo struct {
-	Version     string `json:"version,omitempty"`
-	Cipher      string `json:"cipher,omitempty"`
-	NotAfter    string `json:"not_after,omitempty"`
-	Issuer      string `json:"issuer,omitempty"`
-	Subject     string `json:"subject,omitempty"`
-	DN          string `json:"dn,omitempty"`
-	IsExpired   bool   `json:"is_expired"`
-	IsHttps     bool   `json:"is_https"`
+	Version   string `json:"version,omitempty"`
+	Cipher    string `json:"cipher,omitempty"`
+	NotAfter  string `json:"not_after,omitempty"`
+	Issuer    string `json:"issuer,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	DN        string `json:"dn,omitempty"`
+	IsExpired bool   `json:"is_expired"`
+	IsHttps   bool   `json:"is_https"`
 }
 
 type UptimeDataHandlerSingleMonitor struct {
-	ID             string                  `json:"id"`
-	Name           string                  `json:"name"`
-	Description    null.String             `json:"description,omitempty"`
-	ResponseTimeMs int64                   `json:"response_time_ms"`
-	Age            int                     `json:"age"`
+	ID             string      `json:"id"`
+	Name           string      `json:"name"`
+	Description    null.String `json:"description,omitempty"`
+	ResponseTimeMs int64       `json:"response_time_ms"`
+	Age            int         `json:"age"`
 	Downtimes      map[int]struct {
 		DurationMinutes int `json:"duration_minutes"`
 	} `json:"downtimes"`
-	TLS             *UptimeDataTLSInfo `json:"tls,omitempty"`
+	TLS *UptimeDataTLSInfo `json:"tls,omitempty"`
 }
 
 type UptimeDataHandlerMonitorType string
@@ -773,34 +567,19 @@ func (s *Server) fetchValidMonitorIds(ctx context.Context) ([]UptimeDataMonitorM
 	ctx = span.Context()
 	defer span.Finish()
 
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("acquiring database connection: %w", err)
-	}
-	defer conn.Close()
-
 	yesterday := time.Now().AddDate(0, 0, -1)
-	rows, err := conn.QueryContext(ctx, `
-		SELECT DISTINCT monitor_id
-		FROM monitor_historical
-		WHERE created_at >= ?`, yesterday)
+	monitorIDs, err := s.db.MonitorIDsSince(ctx, yesterday)
 	if err != nil {
 		return nil, fmt.Errorf("querying valid monitor ids: %w", err)
 	}
-	defer rows.Close()
 
-	var monitors []UptimeDataMonitorMetadata
-	for rows.Next() {
-		var monitor UptimeDataMonitorMetadata
-		if err := rows.Scan(&monitor.ID); err != nil {
-			return nil, fmt.Errorf("scanning monitor row: %w", err)
-		}
-
-		// Find the name from s.monitorConfig
-		for _, m := range s.monitorConfig.Monitors {
-			if m.ID == monitor.ID {
-				monitor.Name = m.Name
-				monitor.Description = m.Description
+	monitors := make([]UptimeDataMonitorMetadata, 0, len(monitorIDs))
+	for _, monitorID := range monitorIDs {
+		monitor := UptimeDataMonitorMetadata{ID: monitorID}
+		for _, configured := range s.monitorConfig.Monitors {
+			if configured.ID == monitorID {
+				monitor.Name = configured.Name
+				monitor.Description = configured.Description
 				break
 			}
 		}
@@ -819,90 +598,30 @@ func (s *Server) findMonitorConfig(monitorID string) (Monitor, error) {
 	return Monitor{}, ErrMonitorConfigNotFound
 }
 
-func (s *Server) fetchIncidentState(ctx context.Context, monitorID string) (MonitorIncidentState, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return MonitorIncidentState{}, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
+// ErrMonitorConfigNotFound is returned when a monitor configuration cannot be found for a given monitor ID.
+var ErrMonitorConfigNotFound = errors.New("monitor config not found")
 
-	var state MonitorIncidentState
-	err = conn.QueryRowContext(ctx, `
-		SELECT monitor_id, status, scope, affected_regions, reason, COALESCE(failure_reasons_json, '{}'), last_transition_at, updated_at
-		FROM monitor_incident_state
-		WHERE monitor_id = ?
-	`, monitorID).Scan(
-		&state.MonitorID,
-		&state.Status,
-		&state.Scope,
-		&state.AffectedRegions,
-		&state.Reason,
-		&state.FailureReasonsJson,
-		&state.LastTransitionAt,
-		&state.UpdatedAt,
-	)
+func (s *Server) fetchIncidentState(ctx context.Context, monitorID string) (MonitorIncidentState, error) {
+	state, found, err := s.db.FetchIncidentState(ctx, monitorID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return MonitorIncidentState{
-				MonitorID:          monitorID,
-				Status:             MonitorStatusHealthy,
-				Scope:              MonitorScopeHealthy,
-				AffectedRegions:    "[]",
-				Reason:             "",
-				FailureReasonsJson: "{}",
-			}, nil
-		}
 		return MonitorIncidentState{}, fmt.Errorf("querying incident state: %w", err)
 	}
-
+	if !found {
+		return MonitorIncidentState{
+			MonitorID:          monitorID,
+			Status:             MonitorStatusHealthy,
+			Scope:              MonitorScopeHealthy,
+			AffectedRegions:    "[]",
+			Reason:             "",
+			FailureReasonsJson: "{}",
+		}, nil
+	}
 	return state, nil
 }
 
 func (s *Server) fetchActiveIncident(ctx context.Context, monitorID string) (MonitorIncident, bool, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return MonitorIncident{}, false, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	var incident MonitorIncident
-	err = conn.QueryRowContext(ctx, `
-		SELECT id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, started_at, resolved_at, created_at, updated_at
-		FROM monitor_incidents
-		WHERE monitor_id = ? AND resolved_at IS NULL
-		ORDER BY started_at DESC
-		LIMIT 1
-	`, monitorID).Scan(
-		&incident.ID,
-		&incident.MonitorID,
-		&incident.Source,
-		&incident.LifecycleState,
-		&incident.AutoImpact,
-		&incident.Impact,
-		&incident.AutoTitle,
-		&incident.AutoBody,
-		&incident.Title,
-		&incident.Body,
-		&incident.Status,
-		&incident.Scope,
-		&incident.AffectedRegions,
-		&incident.StartedAt,
-		&incident.ResolvedAt,
-		&incident.CreatedAt,
-		&incident.UpdatedAt,
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return MonitorIncident{}, false, nil
-		}
-		return MonitorIncident{}, false, fmt.Errorf("querying active incident: %w", err)
-	}
-
-	return incident, true, nil
+	return s.db.FetchActiveIncident(ctx, monitorID)
 }
-
-// ErrMonitorConfigNotFound is returned when a monitor configuration cannot be found for a given monitor ID.
-var ErrMonitorConfigNotFound = errors.New("monitor config not found")
 
 func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Raw Monitor Historical"))
@@ -918,56 +637,17 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 	// Fall back to raw data if aggregate is not available
 	slog.InfoContext(ctx, "falling back to raw monitor historical", slog.String("monitor_id", monitorId), slog.String("error", err.Error()))
 
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return UptimeDataHistorical{}, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-	SELECT
-		region,
-		success,
-		status_code,
-		latency_ms,
-		created_at
-	FROM
-		monitor_historical
-	WHERE
-		monitor_id = ?`,
-		monitorId,
-	)
+	monitorHistoricals, err := s.db.RawMonitorHistorical(ctx, monitorId)
 	if err != nil {
 		return UptimeDataHistorical{}, fmt.Errorf("querying monitor historical: %w", err)
 	}
-	defer rows.Close()
-
-	var monitorHistoricals []MonitorHistorical
-	for rows.Next() {
-		var monitorHistorical MonitorHistorical
-		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.Success, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
-			return UptimeDataHistorical{}, fmt.Errorf("scanning monitor historical: %w", err)
-		}
-		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
-	}
-
 	if len(monitorHistoricals) == 0 {
 		return UptimeDataHistorical{}, fmt.Errorf("no raw historical data for monitor %s", monitorId)
 	}
 
-	// Find monitor config for this monitor
-	var monitorConfig Monitor
-	var foundMonitorConfig bool
-	for _, config := range s.monitorConfig.Monitors {
-		if config.ID == monitorId {
-			monitorConfig = config
-			foundMonitorConfig = true
-			break
-		}
-	}
-
-	if !foundMonitorConfig {
-		return UptimeDataHistorical{}, ErrMonitorConfigNotFound
+	monitorConfig, err := s.findMonitorConfig(monitorId)
+	if err != nil {
+		return UptimeDataHistorical{}, err
 	}
 
 	// Group each monitor historicals on a daily bucket
@@ -1030,87 +710,42 @@ func (s *Server) fetchFromRawMonitorHistorical(ctx context.Context, monitorId st
 }
 
 func (s *Server) fetchLatestTLSInfo(ctx context.Context, monitorId string) (*UptimeDataTLSInfo, error) {
-	conn, err := s.db.Conn(ctx)
+	row, found, err := s.db.LatestTLSInfo(ctx, monitorId)
 	if err != nil {
-		return nil, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	var tlsVersion, tlsCipher, tlsCertIssuer, tlsCertSubject, tlsCertDN, tlsCertFingerprint null.String
-	var tlsExpiry, tlsCertNotBefore null.Time
-	var tlsCertIsExpired bool
-
-	err = conn.QueryRowContext(ctx, `
-		SELECT
-			tls_version,
-			tls_cipher,
-			tls_expiry,
-			tls_cert_not_before,
-			tls_cert_issuer,
-			tls_cert_subject,
-			tls_cert_dn,
-			tls_cert_fingerprint,
-			tls_cert_is_expired
-		FROM
-			monitor_historical
-		WHERE
-			monitor_id = ?
-		ORDER BY
-			created_at DESC
-		LIMIT 1`,
-		monitorId,
-	).Scan(
-		&tlsVersion,
-		&tlsCipher,
-		&tlsExpiry,
-		&tlsCertNotBefore,
-		&tlsCertIssuer,
-		&tlsCertSubject,
-		&tlsCertDN,
-		&tlsCertFingerprint,
-		&tlsCertIsExpired,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("querying latest TLS info: %w", err)
 	}
+	if !found {
+		return nil, nil
+	}
 
-	// Determine if this monitor uses HTTPS based on TLS version being present
-	isHttps := !tlsVersion.IsZero()
-
-	// If we have TLS data, build the info struct
-	if isHttps || !tlsCertIssuer.IsZero() || !tlsCertSubject.IsZero() {
-		tlsInfo := &UptimeDataTLSInfo{
-			IsHttps: isHttps,
+	isHttps := !row.TlsVersion.IsZero()
+	if isHttps || !row.TlsCertIssuer.IsZero() || !row.TlsCertSubject.IsZero() {
+		tlsInfo := &UptimeDataTLSInfo{IsHttps: isHttps}
+		if !row.TlsVersion.IsZero() {
+			tlsInfo.Version = row.TlsVersion.String
 		}
-		if !tlsVersion.IsZero() {
-			tlsInfo.Version = tlsVersion.String
+		if !row.TlsCipher.IsZero() {
+			tlsInfo.Cipher = row.TlsCipher.String
 		}
-		if !tlsCipher.IsZero() {
-			tlsInfo.Cipher = tlsCipher.String
+		if !row.TlsExpiry.IsZero() {
+			tlsInfo.NotAfter = row.TlsExpiry.Time.UTC().Format(time.RFC3339)
 		}
-		if !tlsExpiry.IsZero() {
-			tlsInfo.NotAfter = tlsExpiry.Time.UTC().Format(time.RFC3339)
+		if !row.TlsCertIssuer.IsZero() {
+			tlsInfo.Issuer = row.TlsCertIssuer.String
 		}
-		if !tlsCertIssuer.IsZero() {
-			tlsInfo.Issuer = tlsCertIssuer.String
+		if !row.TlsCertSubject.IsZero() {
+			tlsInfo.Subject = row.TlsCertSubject.String
 		}
-		if !tlsCertSubject.IsZero() {
-			tlsInfo.Subject = tlsCertSubject.String
+		if !row.TlsCertDN.IsZero() {
+			tlsInfo.DN = row.TlsCertDN.String
 		}
-		if !tlsCertDN.IsZero() {
-			tlsInfo.DN = tlsCertDN.String
-		}
-		tlsInfo.IsExpired = tlsCertIsExpired
+		tlsInfo.IsExpired = row.TlsCertIsExpired
 		return tlsInfo, nil
 	}
 
 	return nil, nil
 }
 
-// fetchFromAggregateMonitorHistorical fetches monitor historical data from the aggregate table
 func (s *Server) fetchFromAggregateMonitorHistorical(ctx context.Context, monitorId string) (UptimeDataHistorical, error) {
 	span := sentry.StartSpan(ctx, "function", sentry.WithDescription("Fetch From Aggregate Monitor Historical"))
 	ctx = span.Context()
@@ -1177,56 +812,12 @@ func (s *Server) fetchMonitorHistoricalGroupedByRegionFromAggregates(ctx context
 }
 
 func (s *Server) fetchMonitorHistoricalGroupedByRegionRaw(ctx context.Context, monitorId string) (map[string][]MonitorHistorical, error) {
-	conn, err := s.db.Conn(ctx)
+	monitorHistoricals, err := s.db.RawMonitorHistorical(ctx, monitorId)
 	if err != nil {
 		if hub := sentry.GetHubFromContext(ctx); hub != nil {
-			hub.CaptureException(fmt.Errorf("acquiring database connection: %w", err))
+			hub.CaptureException(fmt.Errorf("querying monitor historical: %w", err))
 		}
-		return nil, fmt.Errorf("acquiring database connection: %w", err)
-	}
-	defer func() {
-		if err := conn.Close(); err != nil {
-			if hub := sentry.GetHubFromContext(ctx); hub != nil {
-				hub.CaptureException(fmt.Errorf("closing database connection: %w", err))
-			}
-		}
-	}()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT
-			region,
-			success,
-			status_code,
-			latency_ms,
-			created_at
-		FROM
-			monitor_historical
-		WHERE
-			monitor_id = ?`,
-		monitorId,
-	)
-	if err != nil {
 		return nil, fmt.Errorf("querying monitor historical: %w", err)
-	}
-	defer func() {
-		if err := rows.Close(); err != nil {
-			if hub := sentry.GetHubFromContext(ctx); hub != nil {
-				hub.CaptureException(fmt.Errorf("closing rows: %w", err))
-			}
-		}
-	}()
-
-	var monitorHistoricals []MonitorHistorical
-	for rows.Next() {
-		var monitorHistorical MonitorHistorical
-		if err := rows.Scan(&monitorHistorical.Region, &monitorHistorical.Success, &monitorHistorical.StatusCode, &monitorHistorical.LatencyMs, &monitorHistorical.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scanning monitor historical: %w", err)
-		}
-		monitorHistoricals = append(monitorHistoricals, monitorHistorical)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating monitor historical: %w", err)
 	}
 
 	regionData := make(map[string][]MonitorHistorical)

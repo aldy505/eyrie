@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func newPostgresTestStore(t *testing.T) *PostgresStore {
+func newPostgresTestStore(t testing.TB) *PostgresStore {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -180,12 +180,14 @@ func TestEnsureRawPartitionCreatesToday(t *testing.T) {
 		t.Fatalf("ensuring raw partition: %v", err)
 	}
 
-	var exists bool
-	if err := store.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, partitionName("monitor_historical", now)).Scan(&exists); err != nil {
-		t.Fatalf("checking raw partition: %v", err)
-	}
-	if !exists {
-		t.Fatal("expected today's raw partition to exist")
+	for _, spec := range partitionSpecs {
+		var exists bool
+		if err := store.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, partitionName(spec.table, now)).Scan(&exists); err != nil {
+			t.Fatalf("checking partition %s: %v", partitionName(spec.table, now), err)
+		}
+		if !exists {
+			t.Fatalf("expected today's %s partition to exist", spec.table)
+		}
 	}
 }
 

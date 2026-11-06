@@ -1,11 +1,12 @@
 package main
 
 import (
-	"database/sql"
 	"testing"
 )
 
 func TestMigrateDropsTimestampDefaults(t *testing.T) {
+	requireTestDB(t)
+
 	tables := []struct {
 		tableName  string
 		columnName string
@@ -21,18 +22,20 @@ func TestMigrateDropsTimestampDefaults(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.tableName+"_"+table.columnName, func(t *testing.T) {
-			var actual sql.NullString
+			var actual string
 			err := db.QueryRowContext(t.Context(), `
-				SELECT column_default
+				SELECT COALESCE(column_default, '')
 				FROM information_schema.columns
-				WHERE table_name = ? AND column_name = ?
+				WHERE table_schema = current_schema()
+				  AND table_name = ?
+				  AND column_name = ?
 			`, table.tableName, table.columnName).Scan(&actual)
 			if err != nil {
 				t.Fatalf("failed to inspect %s.%s default: %v", table.tableName, table.columnName, err)
 			}
 
-			if actual.Valid {
-				t.Fatalf("expected %s.%s to have no default, got %q", table.tableName, table.columnName, actual.String)
+			if actual != "" {
+				t.Fatalf("expected %s.%s to have no default, got %q", table.tableName, table.columnName, actual)
 			}
 		})
 	}

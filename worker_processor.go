@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -19,7 +17,7 @@ import (
 )
 
 type ProcessorWorker struct {
-	db              *sql.DB
+	db              *PostgresStore
 	subscriber      *pubsub.Subscription
 	alerterProducer *pubsub.Topic
 	shutdown        chan struct{}
@@ -27,7 +25,7 @@ type ProcessorWorker struct {
 	datasetConfig   DatasetConfig
 }
 
-func NewProcessorWorker(db *sql.DB, subscriber *pubsub.Subscription, alerterProducer *pubsub.Topic, monitorConfig MonitorConfig, datasetConfig DatasetConfig) *ProcessorWorker {
+func NewProcessorWorker(db *PostgresStore, subscriber *pubsub.Subscription, alerterProducer *pubsub.Topic, monitorConfig MonitorConfig, datasetConfig DatasetConfig) *ProcessorWorker {
 	return &ProcessorWorker{
 		db:              db,
 		subscriber:      subscriber,
@@ -236,45 +234,7 @@ func (w *ProcessorWorker) buildFailureReasonsBreakdown(buckets map[time.Time]Sub
 }
 
 func (w *ProcessorWorker) lookback(ctx context.Context, monitorID string, since time.Time) ([]MonitorHistorical, error) {
-	conn, err := w.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id, region, probe_type, success, failure_reason, status_code, latency_ms, response_body, tls_version, tls_cipher, tls_expiry, created_at
-		FROM monitor_historical
-		WHERE monitor_id = ? AND created_at >= ? AND created_at <= ?
-	`, monitorID, since, time.Now())
-	if err != nil {
-		return nil, fmt.Errorf("querying monitor historical: %w", err)
-	}
-	defer rows.Close()
-
-	var results []MonitorHistorical
-	for rows.Next() {
-		var historical MonitorHistorical
-		if err := rows.Scan(
-			&historical.MonitorID,
-			&historical.Region,
-			&historical.ProbeType,
-			&historical.Success,
-			&historical.FailureReason,
-			&historical.StatusCode,
-			&historical.LatencyMs,
-			&historical.ResponseBody,
-			&historical.TlsVersion,
-			&historical.TlsCipher,
-			&historical.TlsExpiry,
-			&historical.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scanning monitor historical: %w", err)
-		}
-		results = append(results, historical)
-	}
-
-	return results, nil
+	return w.db.LookbackMonitorHistorical(ctx, monitorID, since, time.Now().UTC())
 }
 
 type SubmissionBucket struct {
@@ -555,64 +515,25 @@ func (w *ProcessorWorker) analyzeSubmissions(buckets map[time.Time]SubmissionBuc
 }
 
 func (w *ProcessorWorker) loadIncidentState(ctx context.Context, monitorID string) (IncidentEvaluation, error) {
-	conn, err := w.db.Conn(ctx)
+	state, found, err := w.db.FetchIncidentState(ctx, monitorID)
 	if err != nil {
-		return HealthyIncidentEvaluation(), fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	var status string
-	var scope string
-	var regions string
-	var reason string
-	var failureReasonsJson string
-	err = conn.QueryRowContext(ctx, `
-		SELECT status, scope, affected_regions, reason, COALESCE(failure_reasons_json, '{}')
-		FROM monitor_incident_state
-		WHERE monitor_id = ?
-	`, monitorID).Scan(&status, &scope, &regions, &reason, &failureReasonsJson)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return HealthyIncidentEvaluation(), nil
-		}
 		return HealthyIncidentEvaluation(), fmt.Errorf("querying incident state: %w", err)
+	}
+	if !found {
+		return HealthyIncidentEvaluation(), nil
 	}
 
 	return IncidentEvaluation{
-		Status:                  status,
-		Scope:                   scope,
-		Reason:                  reason,
-		AffectedRegions:         ParseRegionsJSON(regions),
-		FailureReasonsBreakdown: ParseFailureReasonsJSON(failureReasonsJson),
+		Status:                  state.Status,
+		Scope:                   state.Scope,
+		Reason:                  state.Reason,
+		AffectedRegions:         ParseRegionsJSON(state.AffectedRegions),
+		FailureReasonsBreakdown: ParseFailureReasonsJSON(state.FailureReasonsJson),
 	}, nil
 }
 
 func (w *ProcessorWorker) storeIncidentState(ctx context.Context, monitorID string, evaluation IncidentEvaluation) error {
-	conn, err := w.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	now := time.Now().UTC()
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO monitor_incident_state (monitor_id, status, scope, affected_regions, reason, failure_reasons_json, last_transition_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (monitor_id) DO UPDATE
-		SET
-			status = EXCLUDED.status,
-			scope = EXCLUDED.scope,
-			affected_regions = EXCLUDED.affected_regions,
-			reason = EXCLUDED.reason,
-			failure_reasons_json = EXCLUDED.failure_reasons_json,
-			last_transition_at = EXCLUDED.last_transition_at,
-			updated_at = EXCLUDED.updated_at
-	`, monitorID, evaluation.Status, evaluation.Scope, evaluation.RegionsJSON(), evaluation.Reason, evaluation.FailureReasonsJSON(), now, now)
-	if err != nil {
-		return fmt.Errorf("upserting incident state: %w", err)
-	}
-
-	return nil
+	return w.db.StoreIncidentState(ctx, monitorID, evaluation)
 }
 
 func (w *ProcessorWorker) publishAlert(ctx context.Context, monitor Monitor, current IncidentEvaluation, previous IncidentEvaluation, incidentID string) error {
@@ -679,46 +600,7 @@ func (w *ProcessorWorker) syncProgrammaticIncident(ctx context.Context, monitor 
 }
 
 func (w *ProcessorWorker) loadActiveProgrammaticIncident(ctx context.Context, monitorID string) (MonitorIncident, bool, error) {
-	conn, err := w.db.Conn(ctx)
-	if err != nil {
-		return MonitorIncident{}, false, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	var incident MonitorIncident
-	err = conn.QueryRowContext(ctx, `
-		SELECT id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, started_at, resolved_at, created_at, updated_at
-		FROM monitor_incidents
-		WHERE monitor_id = ? AND source = ? AND resolved_at IS NULL
-		ORDER BY started_at DESC
-		LIMIT 1
-	`, monitorID, IncidentSourceProgrammatic).Scan(
-		&incident.ID,
-		&incident.MonitorID,
-		&incident.Source,
-		&incident.LifecycleState,
-		&incident.AutoImpact,
-		&incident.Impact,
-		&incident.AutoTitle,
-		&incident.AutoBody,
-		&incident.Title,
-		&incident.Body,
-		&incident.Status,
-		&incident.Scope,
-		&incident.AffectedRegions,
-		&incident.StartedAt,
-		&incident.ResolvedAt,
-		&incident.CreatedAt,
-		&incident.UpdatedAt,
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return MonitorIncident{}, false, nil
-		}
-		return MonitorIncident{}, false, fmt.Errorf("querying active incident: %w", err)
-	}
-
-	return incident, true, nil
+	return w.db.LoadActiveProgrammaticIncident(ctx, monitorID)
 }
 
 func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monitor Monitor, evaluation IncidentEvaluation) (string, error) {
@@ -742,28 +624,9 @@ func (w *ProcessorWorker) createProgrammaticIncident(ctx context.Context, monito
 		UpdatedAt:       now,
 	}
 
-	tx, err := w.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return "", fmt.Errorf("beginning incident transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO monitor_incidents (
-			id, monitor_id, source, lifecycle_state, auto_impact, impact, auto_title, auto_body, title, body, status, scope, affected_regions, failure_reasons_json, started_at, created_at, updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, incident.ID, incident.MonitorID, incident.Source, incident.LifecycleState, incident.AutoImpact, incident.Impact, incident.AutoTitle, incident.AutoBody, incident.Title, incident.Body, incident.Status, incident.Scope, incident.AffectedRegions, evaluation.FailureReasonsJSON(), incident.StartedAt, incident.CreatedAt, incident.UpdatedAt)
-	if err != nil {
-		return "", fmt.Errorf("inserting programmatic incident: %w", err)
-	}
-
-	if err := insertIncidentEventTx(ctx, tx, incident, IncidentEventTypeCreated, incident.Title, incident.Body, now); err != nil {
+	event := newIncidentEvent(incident, IncidentEventTypeCreated, incident.Title, incident.Body, now)
+	if err := w.db.CreateProgrammaticIncident(ctx, incident, evaluation.FailureReasonsJSON(), event); err != nil {
 		return "", err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("committing incident transaction: %w", err)
 	}
 	return incident.ID, nil
 }
@@ -783,33 +646,6 @@ func (w *ProcessorWorker) updateProgrammaticIncident(ctx context.Context, incide
 	}
 
 	now := time.Now().UTC()
-	tx, err := w.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("beginning incident transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE monitor_incidents
-		SET
-			auto_impact = ?,
-			impact = ?,
-			auto_title = ?,
-			auto_body = ?,
-			title = ?,
-			body = ?,
-			lifecycle_state = ?,
-			status = ?,
-			scope = ?,
-			affected_regions = ?,
-			failure_reasons_json = ?,
-			updated_at = ?
-		WHERE id = ?
-	`, autoImpact, updatedImpact, autoTitle, autoBody, updatedTitle, updatedBody, lifecycleState, evaluation.Status, evaluation.Scope, affectedRegions, evaluation.FailureReasonsJSON(), now, incident.ID)
-	if err != nil {
-		return fmt.Errorf("updating programmatic incident: %w", err)
-	}
-
 	incident.AutoImpact = autoImpact
 	incident.Impact = updatedImpact
 	incident.AutoTitle = autoTitle
@@ -822,39 +658,13 @@ func (w *ProcessorWorker) updateProgrammaticIncident(ctx context.Context, incide
 	incident.UpdatedAt = now
 	incident.LifecycleState = lifecycleState
 
-	if err := insertIncidentEventTx(ctx, tx, incident, IncidentEventTypeUpdated, updatedTitle, updatedBody, now); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing incident transaction: %w", err)
-	}
-	return nil
+	event := newIncidentEvent(incident, IncidentEventTypeUpdated, updatedTitle, updatedBody, now)
+	return w.db.UpdateProgrammaticIncident(ctx, incident, evaluation.FailureReasonsJSON(), event)
 }
 
 func (w *ProcessorWorker) resolveProgrammaticIncident(ctx context.Context, incident MonitorIncident) error {
 	now := time.Now().UTC()
 	resolutionBody := fmt.Sprintf("Monitor recovered from %s %s", incident.Scope, incident.Status)
-
-	tx, err := w.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("beginning incident transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE monitor_incidents
-		SET
-			lifecycle_state = ?,
-			status = ?,
-			scope = ?,
-			resolved_at = ?,
-			updated_at = ?
-		WHERE id = ?
-	`, IncidentLifecycleResolved, MonitorStatusHealthy, MonitorScopeHealthy, now, now, incident.ID)
-	if err != nil {
-		return fmt.Errorf("resolving programmatic incident: %w", err)
-	}
 
 	incident.LifecycleState = IncidentLifecycleResolved
 	incident.Status = MonitorStatusHealthy
@@ -862,27 +672,26 @@ func (w *ProcessorWorker) resolveProgrammaticIncident(ctx context.Context, incid
 	incident.ResolvedAt = null.TimeFrom(now)
 	incident.UpdatedAt = now
 
-	if err := insertIncidentEventTx(ctx, tx, incident, IncidentEventTypeResolved, incident.Title, resolutionBody, now); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing incident transaction: %w", err)
-	}
-	return nil
+	event := newIncidentEvent(incident, IncidentEventTypeResolved, incident.Title, resolutionBody, now)
+	return w.db.ResolveProgrammaticIncident(ctx, incident, event)
 }
 
-func insertIncidentEventTx(ctx context.Context, tx *sql.Tx, incident MonitorIncident, eventType string, title string, body string, createdAt time.Time) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO monitor_incident_events (
-			id, incident_id, monitor_id, event_type, source, lifecycle_state, impact, title, body, status, scope, affected_regions, created_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, uuid.NewString(), incident.ID, incident.MonitorID, eventType, incident.Source, incident.LifecycleState, incident.Impact, title, body, incident.Status, incident.Scope, incident.AffectedRegions, createdAt)
-	if err != nil {
-		return fmt.Errorf("inserting incident event: %w", err)
+func newIncidentEvent(incident MonitorIncident, eventType string, title string, body string, createdAt time.Time) MonitorIncidentEvent {
+	return MonitorIncidentEvent{
+		ID:              uuid.NewString(),
+		IncidentID:      incident.ID,
+		MonitorID:       incident.MonitorID,
+		EventType:       eventType,
+		Source:          incident.Source,
+		LifecycleState:  incident.LifecycleState,
+		Impact:          incident.Impact,
+		Title:           title,
+		Body:            body,
+		Status:          incident.Status,
+		Scope:           incident.Scope,
+		AffectedRegions: incident.AffectedRegions,
+		CreatedAt:       createdAt,
 	}
-	return nil
 }
 
 func preserveManualString(current string, previousAuto string, nextAuto string) string {
