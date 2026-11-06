@@ -46,19 +46,6 @@ func TestServerConfigFindRegisteredCheckerRequiresExactKey(t *testing.T) {
 	}
 }
 
-func TestServerConfigValidateRejectsNegativeReadConcurrencyLimit(t *testing.T) {
-	config := ServerConfig{}
-	config.Database.ReadConcurrencyLimit = -1
-
-	err := config.Validate()
-	if err == nil {
-		t.Fatal("expected read_concurrency_limit validation error")
-	}
-	if !strings.Contains(err.Error(), "database.read_concurrency_limit") {
-		t.Fatalf("expected database.read_concurrency_limit error, got %v", err)
-	}
-}
-
 func TestServerConfigValidateRejectsRedisCacheWithoutAddress(t *testing.T) {
 	config := ServerConfig{}
 	config.Cache.Backend = "redis"
@@ -110,9 +97,9 @@ func TestServerConfigValidateAcceptsPostgresDatabaseSettings(t *testing.T) {
 	config.Database.URL = "postgres://eyrie:eyrie@localhost:5432/eyrie?sslmode=disable"
 	config.Database.MaxConnections = 20
 	config.Database.MinConnections = 2
+	config.Dataset.RetentionDays = 90
 	config.Dataset.PartitionLookaheadDays = 7
 	config.Dataset.CleanupIntervalMinutes = 60
-	config.Dataset.CleanupBatchSize = 1
 
 	if err := config.Validate(); err != nil {
 		t.Fatalf("expected valid database config, got %v", err)
@@ -124,6 +111,9 @@ func TestServerConfigValidateRejectsInvalidPoolSettings(t *testing.T) {
 	config.Database.URL = "postgres://eyrie:eyrie@localhost:5432/eyrie?sslmode=disable"
 	config.Database.MaxConnections = 2
 	config.Database.MinConnections = 3
+	config.Dataset.RetentionDays = 90
+	config.Dataset.PartitionLookaheadDays = 7
+	config.Dataset.CleanupIntervalMinutes = 60
 
 	err := config.Validate()
 	if err == nil {
@@ -143,5 +133,20 @@ func TestDatabaseURLEnvironmentOverride(t *testing.T) {
 	}
 	if config.Database.URL != "postgres://env-user:env-pass@db.example.com:5432/eyrie?sslmode=require" { // trufflehog:ignore
 		t.Fatalf("expected DATABASE_URL to populate database.url, got %q", config.Database.URL)
+	}
+}
+
+func TestServerConfigValidateRequiresDatabaseURL(t *testing.T) {
+	config := ServerConfig{}
+	config.Dataset.RetentionDays = 90
+	config.Dataset.PartitionLookaheadDays = 7
+	config.Dataset.CleanupIntervalMinutes = 60
+
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("expected database.url validation error")
+	}
+	if !strings.Contains(err.Error(), "database.url") {
+		t.Fatalf("expected database.url error, got %v", err)
 	}
 }

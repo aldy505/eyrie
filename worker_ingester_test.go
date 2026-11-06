@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"math/rand/v2"
 	"testing"
 	"time"
 
 	"github.com/guregu/null/v5"
+	"gocloud.dev/pubsub"
 )
 
 func dirtyAggregationTaskCount(w *IngesterWorker) int {
@@ -15,19 +17,8 @@ func dirtyAggregationTaskCount(w *IngesterWorker) int {
 	return len(w.dirtyAggregationTasks)
 }
 
-func TestIngesterWorker_AggregationSeedLookbackUsesRetentionDays(t *testing.T) {
-	worker := &IngesterWorker{datasetConfig: DatasetConfig{RetentionDays: 7}}
-	if got := worker.aggregationSeedLookback(); got != 7*24*time.Hour {
-		t.Fatalf("expected 7 day seed lookback, got %s", got)
-	}
-
-	worker = &IngesterWorker{}
-	if got := worker.aggregationSeedLookback(); got != 30*24*time.Hour {
-		t.Fatalf("expected default 30 day seed lookback, got %s", got)
-	}
-}
-
 func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
+	requireTestDB(t)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 		defer cancel()
@@ -79,7 +70,7 @@ func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 			TlsVersion:   tlsVersion,
 			TlsCipher:    tlsCipher,
 			TlsExpiry:    TlsExpiry,
-			Timestamp:    time.Now().Add(time.Millisecond * time.Duration(rand.Uint())),
+			Timestamp:    time.Now().Add(time.Microsecond * time.Duration(i)),
 			Timings: CheckerTraceTimings{
 				ConnAcquiredMs:      int64(rand.Uint64N(10_000)),
 				FirstResponseByteMs: int64(rand.Uint64N(5_000)),
@@ -118,6 +109,7 @@ func TestIngesterWorker_IngestMonitorHistorical(t *testing.T) {
 }
 
 func TestIngesterWorker_IngestMonitorHistoricalIsIdempotent(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-ingest-idempotent"
 
 	t.Cleanup(func() {
@@ -174,6 +166,7 @@ func TestIngesterWorker_IngestMonitorHistoricalIsIdempotent(t *testing.T) {
 }
 
 func TestIngesterWorker_IngestMonitorHistoricalUsesMonitorSuccessSemantics(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-ingest-monitor-http-semantics"
 
 	t.Cleanup(func() {
@@ -244,6 +237,7 @@ func TestIngesterWorker_IngestMonitorHistoricalUsesMonitorSuccessSemantics(t *te
 }
 
 func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-monitor"
 	testDate := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)
 
@@ -405,6 +399,7 @@ func TestIngesterWorker_AggregateDailyMonitorHistorical(t *testing.T) {
 }
 
 func TestIngesterWorker_AggregateDailyMonitorHistoricalUsesMonitorSuccessSemantics(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-monitor-http-semantics"
 	testDate := time.Date(2025, 1, 18, 0, 0, 0, 0, time.UTC)
 
@@ -487,6 +482,7 @@ func TestIngesterWorker_AggregateDailyMonitorHistoricalUsesMonitorSuccessSemanti
 }
 
 func TestIngesterWorker_AggregateDailyMonitorHistoricalSkipsUnknownMonitorConfig(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-missing-monitor-config"
 	testDate := time.Date(2025, 1, 22, 0, 0, 0, 0, time.UTC)
 
@@ -558,6 +554,7 @@ func TestIngesterWorker_AggregateDailyMonitorHistoricalSkipsUnknownMonitorConfig
 }
 
 func TestIngesterWorker_AggregateDirtyMonitorsProcessesTouchedMonitorDates(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-dirty-monitor"
 	testDate1 := time.Date(2025, 1, 24, 8, 15, 0, 0, time.UTC)
 	testDate2 := testDate1.Add(24 * time.Hour)
@@ -627,7 +624,7 @@ func TestIngesterWorker_AggregateDirtyMonitorsProcessesTouchedMonitorDates(t *te
 	defer conn.Close()
 
 	type aggregateRow struct {
-		date        string
+		date        time.Time
 		successRate int
 	}
 
@@ -657,10 +654,10 @@ func TestIngesterWorker_AggregateDirtyMonitorsProcessesTouchedMonitorDates(t *te
 	if len(aggregates) != 2 {
 		t.Fatalf("expected 2 aggregate rows, got %d", len(aggregates))
 	}
-	if date, err := parseAggregationDate(aggregates[0].date); err != nil || !date.Equal(normalizeAggregationDate(testDate1)) || aggregates[0].successRate != 100 {
+	if !aggregates[0].date.Equal(normalizeAggregationDate(testDate1)) || aggregates[0].successRate != 100 {
 		t.Fatalf("unexpected first aggregate row: %+v", aggregates[0])
 	}
-	if date, err := parseAggregationDate(aggregates[1].date); err != nil || !date.Equal(normalizeAggregationDate(testDate2)) || aggregates[1].successRate != 0 {
+	if !aggregates[1].date.Equal(normalizeAggregationDate(testDate2)) || aggregates[1].successRate != 0 {
 		t.Fatalf("unexpected second aggregate row: %+v", aggregates[1])
 	}
 }
@@ -674,5 +671,85 @@ func TestParseAggregationDateSupportsRFC3339Timestamp(t *testing.T) {
 	expected := time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC)
 	if !date.Equal(expected) {
 		t.Fatalf("expected parsed date %s, got %s", expected, date)
+	}
+}
+
+func TestIngesterWorker_StartBatchesMessages(t *testing.T) {
+	requireTestDB(t)
+	monitorID := "test-batch-ingester"
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx, `DELETE FROM monitor_historical WHERE monitor_id = ?`, monitorID); err != nil {
+			t.Fatalf("failed to clean up monitor_historical: %v", err)
+		}
+	})
+
+	ctx := t.Context()
+	topic, err := pubsub.OpenTopic(ctx, "mem://eyrie-batch-ingester")
+	if err != nil {
+		t.Fatalf("opening topic: %v", err)
+	}
+	defer topic.Shutdown(ctx)
+
+	subscription, err := pubsub.OpenSubscription(ctx, "mem://eyrie-batch-ingester")
+	if err != nil {
+		t.Fatalf("opening subscription: %v", err)
+	}
+	defer subscription.Shutdown(ctx)
+
+	worker := NewIngesterWorker(db, subscription, MonitorConfig{}, DatasetConfig{PartitionLookaheadDays: 7})
+	done := make(chan error, 1)
+	go func() {
+		done <- worker.Start()
+	}()
+
+	now := time.Now().UTC()
+	for i := 0; i < 10; i++ {
+		body, err := json.Marshal(CheckerSubmissionRequest{
+			MonitorID:  monitorID,
+			ProbeType:  string(MonitorTypeHTTP),
+			Success:    true,
+			LatencyMs:  int64(100 + i),
+			StatusCode: 200,
+			Timestamp:  now.Add(time.Duration(i) * time.Microsecond),
+		})
+		if err != nil {
+			t.Fatalf("marshaling submission: %v", err)
+		}
+		if err := topic.Send(ctx, &pubsub.Message{
+			Body:     body,
+			Metadata: map[string]string{"region": "us-east-1"},
+		}); err != nil {
+			t.Fatalf("sending submission: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM monitor_historical WHERE monitor_id = ?`, monitorID).Scan(&count); err != nil {
+			t.Fatalf("counting rows: %v", err)
+		}
+		if count == 10 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for 10 rows, got %d", count)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	worker.Stop()
+	if err := subscription.Shutdown(ctx); err != nil {
+		t.Fatalf("shutting down subscription: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ingester worker returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ingester worker did not stop")
 	}
 }

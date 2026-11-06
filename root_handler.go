@@ -109,16 +109,6 @@ func (s *Server) RootHandler(spa *spaHandler) http.HandlerFunc {
 		}
 
 		format := resolveRootCLIFormat(r)
-		if err := s.acquireDuckDBReadPermit(r.Context()); err != nil {
-			if hub := sentry.GetHubFromContext(r.Context()); hub != nil {
-				hub.CaptureException(fmt.Errorf("acquiring duckdb read permit: %w", err))
-			}
-			writeRootError(w, format, http.StatusServiceUnavailable, "request cancelled while waiting for database capacity")
-			return
-		}
-		if s.duckDBReadLimiter != nil {
-			defer s.duckDBReadLimiter.Release(1)
-		}
 
 		response, err := s.buildRootStatusResponse(r.Context())
 		if err != nil {
@@ -315,45 +305,24 @@ func latestRootUpdate(times ...time.Time) time.Time {
 }
 
 func (s *Server) loadRecentIncidentEvents(ctx context.Context, limit int) ([]RootStatusEvent, error) {
-	conn, err := s.db.Conn(ctx)
+	incidentEvents, err := s.db.RecentIncidentEvents(ctx, limit)
 	if err != nil {
-		return nil, fmt.Errorf("getting db connection: %w", err)
-	}
-	defer conn.Close()
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT monitor_id, event_type, impact, title, body, status, scope, created_at
-		FROM monitor_incident_events
-		ORDER BY created_at DESC
-		LIMIT ?
-	`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("querying recent incident events: %w", err)
-	}
-	defer rows.Close()
-
-	events := make([]RootStatusEvent, 0, limit)
-	for rows.Next() {
-		var event RootStatusEvent
-		if err := rows.Scan(
-			&event.MonitorID,
-			&event.EventType,
-			&event.Impact,
-			&event.Title,
-			&event.Body,
-			&event.Status,
-			&event.Scope,
-			&event.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scanning recent incident event: %w", err)
-		}
-
-		event.Name = s.monitorName(event.MonitorID)
-		events = append(events, event)
+		return nil, err
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating recent incident events: %w", err)
+	events := make([]RootStatusEvent, 0, len(incidentEvents))
+	for _, incidentEvent := range incidentEvents {
+		events = append(events, RootStatusEvent{
+			MonitorID: incidentEvent.MonitorID,
+			Name:      s.monitorName(incidentEvent.MonitorID),
+			EventType: incidentEvent.EventType,
+			Status:    incidentEvent.Status,
+			Scope:     incidentEvent.Scope,
+			Impact:    incidentEvent.Impact,
+			Title:     incidentEvent.Title,
+			Body:      incidentEvent.Body,
+			CreatedAt: incidentEvent.CreatedAt,
+		})
 	}
 
 	return events, nil
