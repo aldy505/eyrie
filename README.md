@@ -9,7 +9,7 @@ The backend is a Go monolith that can run as a **server** or a **checker**. The 
 - Region-aware monitor execution with checker registration and authenticated result submission
 - HTTP, TCP, ICMP, Redis, PostgreSQL, MySQL, Microsoft SQL Server, and ClickHouse monitors
 - ClickHouse support over both native TCP and HTTP transport through DSN configuration
-- Raw submission ingestion plus daily uptime aggregation in DuckDB
+- Raw submission ingestion plus hourly and daily uptime aggregation in PostgreSQL
 - Programmatic incidents with persisted lifecycle records and event timeline groundwork
 - Webhook, Slack, Discord, Teams, and ntfy alert delivery targets
 - Sentry error monitoring, tracing, logs, and custom metrics around checks, ingestion, processing, and alerting
@@ -37,7 +37,7 @@ See `example_configurations/monitor.example.yaml` for sample definitions.
 
 The server process:
 
-- runs DuckDB migrations
+- runs PostgreSQL migrations and maintains time-based partitions
 - exposes the HTTP API and embedded SPA
 - receives checker submissions
 - fans submissions out to ingester and processor queues
@@ -53,6 +53,32 @@ Each checker:
 - downloads the current monitor configuration
 - executes checks on schedule
 - submits structured probe results back to the server
+
+## Storage model
+
+Eyrie stores uptime data in PostgreSQL 18+. Plain PostgreSQL is enough; no extensions such as TimescaleDB are required.
+
+- `monitor_historical` stores raw probe results and is partitioned by UTC day on `created_at`
+- `monitor_historical_hourly_aggregate` and `monitor_historical_hourly_region_aggregate` store hourly rollups
+- `monitor_historical_daily_aggregate` and `monitor_historical_region_daily_aggregate` store the daily rollups used by the status page
+- `monitor_incident_state`, `monitor_incidents`, and `monitor_incident_events` store incident state, records, and timeline events
+
+The service creates the current and future partitions automatically. Retention drops whole expired partitions instead of deleting rows one by one, and removes incidents by start time and events by event time (plus events belonging to deleted incidents) once they are older than `dataset.retention_days`. Submissions older than the current UTC day are acknowledged but not inserted; the ingester logs the time drift.
+
+Configure the connection with:
+
+```yaml
+database:
+  url: "postgres://eyrie:eyrie@localhost:5432/eyrie?sslmode=disable"
+  max_connections: 20
+  min_connections: 2
+```
+
+`DATABASE_URL` overrides `database.url`. The service needs permission to create and drop tables because it manages partitions at runtime.
+
+## Upgrading from DuckDB
+
+This release replaces DuckDB with PostgreSQL. Existing DuckDB data is not imported. Point `database.url` at a fresh PostgreSQL database and keep the old DuckDB file only as an archive.
 
 ## API surface
 
@@ -148,12 +174,28 @@ Example Sentry configuration is included in `example_configurations/server.examp
 
 - Go 1.25+
 - Node.js 22+
+- PostgreSQL 18+ (the examples below use the `postgres:18-alpine` image)
+
+### Run PostgreSQL
+
+```bash
+docker run -d --rm --name eyrie-postgres \
+  -e POSTGRES_USER=eyrie \
+  -e POSTGRES_PASSWORD=eyrie \
+  -e POSTGRES_DB=eyrie \
+  -p 5432:5432 \
+  postgres:18-alpine
+
+docker exec eyrie-postgres createdb -U eyrie eyrie_test
+```
 
 ### Run the server
 
 ```bash
 go run . -mode=server -config=./example_configurations/server.example.yaml -monitor=./example_configurations/monitor.example.yaml
 ```
+
+The example config points at `postgres://eyrie:eyrie@localhost:5432/eyrie?sslmode=disable`. Set `DATABASE_URL` to override it.
 
 ### Run one or more checkers
 
@@ -174,9 +216,11 @@ npm run dev
 ### Backend
 
 ```bash
-go test ./...
+TEST_DATABASE_URL="postgres://eyrie:eyrie@localhost:5432/eyrie_test?sslmode=disable" go test ./...
 go build -o eyrie .
 ```
+
+Without `TEST_DATABASE_URL`, database integration tests are skipped and the pure unit tests still run. CI starts a `postgres:18-alpine` service and sets this variable automatically.
 
 ### Frontend
 
@@ -186,22 +230,20 @@ npm run lint
 npm run build
 ```
 
-## DuckDB recovery note
+## PostgreSQL operational notes
 
-If server mode fails during startup with a DuckDB error like `Failure while replaying WAL file ... GetDefaultDatabase with no default database set`, DuckDB is crashing while recovering `database.db.wal` before Eyrie can run migrations.
-
-1. Back up both the main database file and its WAL first.
-2. If the WAL only contains disposable recent writes, remove the `.wal` file and restart Eyrie.
-3. If the WAL may contain data you need to preserve, recover from a copy by exporting into a fresh database with a newer DuckDB build instead of deleting the WAL outright.
-
-Newer Eyrie builds shut the server down cleanly on both `SIGINT` and `SIGTERM`, which is important when the service is managed by systemd or another process supervisor.
+- Use PostgreSQL 18 or newer.
+- The service runs embedded migrations on startup and records them in `schema_migrations`.
+- Partition creation and retention require table create/drop privileges.
+- External clients such as `psql`, Grafana, and DBeaver can query the tables directly.
+- The service uses UTC for daily partitioning and `date_trunc` rollups.
 
 ## Repository layout
 
 - Go sources live at the repository root
 - `frontend/` contains the SPA
 - `example_configurations/` contains starter YAML files
-- `migrations/` contains DuckDB schema migrations
+- `migrations/postgres/` contains the embedded PostgreSQL schema migrations
 
 ## License
 
