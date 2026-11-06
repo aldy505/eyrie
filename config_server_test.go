@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/kelseyhightower/envconfig"
 )
 
 func TestServerConfigValidateRejectsDuplicateAPIKeys(t *testing.T) {
@@ -100,5 +102,46 @@ func TestServerConfigValidateRejectsDuplicateAlertNames(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate alert name") {
 		t.Fatalf("expected duplicate alert name error, got %v", err)
+	}
+}
+
+func TestServerConfigValidateAcceptsPostgresDatabaseSettings(t *testing.T) {
+	config := ServerConfig{}
+	config.Database.URL = "postgres://eyrie:eyrie@localhost:5432/eyrie?sslmode=disable"
+	config.Database.MaxConnections = 20
+	config.Database.MinConnections = 2
+	config.Dataset.PartitionLookaheadDays = 7
+	config.Dataset.CleanupIntervalMinutes = 60
+	config.Dataset.CleanupBatchSize = 1
+
+	if err := config.Validate(); err != nil {
+		t.Fatalf("expected valid database config, got %v", err)
+	}
+}
+
+func TestServerConfigValidateRejectsInvalidPoolSettings(t *testing.T) {
+	config := ServerConfig{}
+	config.Database.URL = "postgres://eyrie:eyrie@localhost:5432/eyrie?sslmode=disable"
+	config.Database.MaxConnections = 2
+	config.Database.MinConnections = 3
+
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("expected pool size validation error")
+	}
+	if !strings.Contains(err.Error(), "database.min_connections") {
+		t.Fatalf("expected database.min_connections error, got %v", err)
+	}
+}
+
+func TestDatabaseURLEnvironmentOverride(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://env-user:env-pass@db.example.com:5432/eyrie?sslmode=require") // trufflehog:ignore
+
+	var config ServerConfig
+	if err := envconfig.Process("", &config); err != nil {
+		t.Fatalf("processing environment: %v", err)
+	}
+	if config.Database.URL != "postgres://env-user:env-pass@db.example.com:5432/eyrie?sslmode=require" { // trufflehog:ignore
+		t.Fatalf("expected DATABASE_URL to populate database.url, got %q", config.Database.URL)
 	}
 }

@@ -57,6 +57,22 @@ jobs:
     concurrency:
       group: build-binary-${{ github.ref_name || github.sha }}-${{ matrix.architecture }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: eyrie
+          POSTGRES_PASSWORD: eyrie
+          POSTGRES_DB: eyrie_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eyrie -d eyrie_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://eyrie:eyrie@localhost:5432/eyrie_test?sslmode=disable # trufflehog:ignore
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
       - name: Setup Go
