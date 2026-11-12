@@ -27,6 +27,10 @@ registered_checkers:
 
 database:
   path: "/var/lib/eyrie/database.db"
+  # PostgreSQL foundation settings for the upcoming storage cutover.
+  # url: "postgres://eyrie:eyrie@localhost:5432/eyrie?sslmode=disable" # trufflehog:ignore
+  # max_connections: 20
+  # min_connections: 2
   # Optional. When zero or omitted, defaults to max(1, GOMAXPROCS/2).
   read_concurrency_limit: 0
 
@@ -45,6 +49,7 @@ dataset:
   retention_days: 90
   cleanup_interval_minutes: 60
   cleanup_batch_size: 100000
+  partition_lookahead_days: 7
   processing_lookback_minutes: 10
   per_region_failure_threshold_percent: 40
   failure_threshold_percent: 50

@@ -11,6 +11,7 @@ type DatasetConfig struct {
 	RetentionDays                       int     `yaml:"retention_days" default:"90"`
 	CleanupIntervalMinutes              int     `yaml:"cleanup_interval_minutes" default:"60"`
 	CleanupBatchSize                    int     `yaml:"cleanup_batch_size" default:"100000"`
+	PartitionLookaheadDays              int     `yaml:"partition_lookahead_days" default:"7"`
 	ProcessingLookbackMinutes           int     `yaml:"processing_lookback_minutes" default:"10"`
 	PerRegionFailureThresholdPercent    float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
 	FailureThresholdPercent             float64 `yaml:"failure_threshold_percent" default:"50.0"`
@@ -70,6 +71,14 @@ func (c RegisteredChecker) EffectiveName() string {
 	return c.Region
 }
 
+type DatabaseConfig struct {
+	URL                  string `yaml:"url" envconfig:"DATABASE_URL"`
+	MaxConnections       int    `yaml:"max_connections" default:"20"`
+	MinConnections       int    `yaml:"min_connections" default:"2"`
+	Path                 string `yaml:"path" default:"eyrie.db"`
+	ReadConcurrencyLimit int    `yaml:"read_concurrency_limit" default:"0"`
+}
+
 type ServerConfig struct {
 	Server struct {
 		Host string `yaml:"host"`
@@ -83,11 +92,8 @@ type ServerConfig struct {
 		FrontendDesign  string `yaml:"frontend_design" default:"hearth" envconfig:"EYRIE_FRONTEND_DESIGN"`
 	} `yaml:"metadata"`
 	RegisteredCheckers []RegisteredChecker `yaml:"registered_checkers"`
-	Database           struct {
-		Path                 string `yaml:"path" default:"eyrie.db"`
-		ReadConcurrencyLimit int    `yaml:"read_concurrency_limit" default:"0"`
-	} `yaml:"database"`
-	Cache struct {
+	Database           DatabaseConfig      `yaml:"database"`
+	Cache              struct {
 		Backend string `yaml:"backend" default:"memory"`
 		Redis   struct {
 			Address       string `yaml:"address"`
@@ -155,6 +161,20 @@ func (c ServerConfig) Validate() error {
 
 	if c.Database.ReadConcurrencyLimit < 0 {
 		return fmt.Errorf("database.read_concurrency_limit must be zero or greater")
+	}
+	if c.Database.URL != "" {
+		if c.Database.MaxConnections <= 0 {
+			return fmt.Errorf("database.max_connections must be greater than 0")
+		}
+		if c.Database.MinConnections < 0 {
+			return fmt.Errorf("database.min_connections must be zero or greater")
+		}
+		if c.Database.MinConnections > c.Database.MaxConnections {
+			return fmt.Errorf("database.min_connections must be less than or equal to database.max_connections")
+		}
+	}
+	if c.Dataset.PartitionLookaheadDays < 0 {
+		return fmt.Errorf("dataset.partition_lookahead_days must be zero or greater")
 	}
 
 	switch strings.ToLower(strings.TrimSpace(c.Cache.Backend)) {
