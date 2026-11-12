@@ -12,44 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/guregu/null/v5"
-	"golang.org/x/sync/semaphore"
 )
-
-func TestResolveDuckDBReadConcurrencyLimit(t *testing.T) {
-	tests := []struct {
-		name       string
-		configured int
-		gomaxprocs int
-		want       int64
-	}{
-		{
-			name:       "uses configured limit when set",
-			configured: 7,
-			gomaxprocs: 8,
-			want:       7,
-		},
-		{
-			name:       "derives half of gomaxprocs when unset",
-			configured: 0,
-			gomaxprocs: 8,
-			want:       4,
-		},
-		{
-			name:       "keeps minimum of one permit",
-			configured: 0,
-			gomaxprocs: 1,
-			want:       1,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveDuckDBReadConcurrencyLimit(tt.configured, tt.gomaxprocs); got != tt.want {
-				t.Fatalf("resolveDuckDBReadConcurrencyLimit(%d, %d) = %d, want %d", tt.configured, tt.gomaxprocs, got, tt.want)
-			}
-		})
-	}
-}
 
 func TestServerPprofEndpointIsDisabledByDefault(t *testing.T) {
 	t.Setenv("ENABLE_PPROF_ENDPOINT", "")
@@ -282,6 +245,7 @@ type rootStatusTestSeedOptions struct {
 
 func newRootStatusTestServer(t *testing.T, options rootStatusTestSeedOptions) *Server {
 	t.Helper()
+	requireTestDB(t)
 
 	monitorID := options.MonitorID
 	if monitorID == "" {
@@ -383,6 +347,7 @@ func newRootStatusTestServer(t *testing.T, options rootStatusTestSeedOptions) *S
 
 func cleanupRootStatusTestData(t *testing.T, monitorID string) {
 	t.Helper()
+	requireTestDB(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -409,48 +374,8 @@ func cleanupRootStatusTestData(t *testing.T, monitorID string) {
 	}
 }
 
-func TestServerWithDuckDBReadPermitWaitsForPermit(t *testing.T) {
-	server := &Server{
-		duckDBReadLimiter: semaphore.NewWeighted(1),
-	}
-
-	if err := server.duckDBReadLimiter.Acquire(t.Context(), 1); err != nil {
-		t.Fatalf("failed to acquire initial permit: %v", err)
-	}
-
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/uptime-data", nil)
-	handlerStarted := make(chan struct{})
-	handlerFinished := make(chan struct{})
-
-	go func() {
-		server.withDuckDBReadPermit(func(w http.ResponseWriter, r *http.Request) {
-			close(handlerStarted)
-			w.WriteHeader(http.StatusNoContent)
-		})(recorder, request)
-		close(handlerFinished)
-	}()
-
-	select {
-	case <-handlerStarted:
-		t.Fatal("handler should wait for permit before running")
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	server.duckDBReadLimiter.Release(1)
-
-	select {
-	case <-handlerFinished:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not complete after permit release")
-	}
-
-	if recorder.Code != http.StatusNoContent {
-		t.Fatalf("expected status %d, got %d", http.StatusNoContent, recorder.Code)
-	}
-}
-
 func TestServer_FetchFromAggregateMonitorHistorical(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-server-monitor"
 	testDate1 := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)
 	testDate2 := time.Date(2025, 1, 16, 0, 0, 0, 0, time.UTC)
@@ -598,6 +523,7 @@ func TestServer_FetchFromAggregateMonitorHistorical(t *testing.T) {
 }
 
 func TestServer_FetchFromAggregateMonitorHistoricalUsesExpectedStatusCodes(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-server-http-semantics"
 	testDate := time.Date(2025, 1, 19, 0, 0, 0, 0, time.UTC)
 
@@ -686,6 +612,7 @@ func TestServer_FetchFromAggregateMonitorHistoricalUsesExpectedStatusCodes(t *te
 }
 
 func TestServer_FetchFromAggregateMonitorHistoricalCachesHistoricalRows(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-server-cache"
 	today := utcDayStart(time.Now().UTC())
 	yesterday := today.AddDate(0, 0, -1)
@@ -804,6 +731,7 @@ func TestServer_FetchFromAggregateMonitorHistoricalCachesHistoricalRows(t *testi
 }
 
 func TestServer_FetchFromAggregateMonitorHistoricalRefreshesTodayRows(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-aggregate-server-refresh-today"
 	today := utcDayStart(time.Now().UTC())
 	yesterday := today.AddDate(0, 0, -1)
@@ -914,6 +842,7 @@ func TestServer_FetchFromAggregateMonitorHistoricalRefreshesTodayRows(t *testing
 }
 
 func TestServer_UptimeDataByRegionHandlerCachesHistoricalAggregates(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-region-aggregate-cache"
 	today := utcDayStart(time.Now().UTC())
 	yesterday := today.AddDate(0, 0, -1)
@@ -1055,6 +984,7 @@ func TestServer_UptimeDataByRegionHandlerCachesHistoricalAggregates(t *testing.T
 }
 
 func TestServer_FetchFromRawMonitorHistoricalFallback(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-fallback-monitor"
 	testDate := time.Date(2025, 1, 17, 0, 0, 0, 0, time.UTC)
 
@@ -1126,6 +1056,7 @@ func TestServer_FetchFromRawMonitorHistoricalFallback(t *testing.T) {
 }
 
 func TestServer_UptimeDataHandler_IncludesConfiguredMonitorsWithNoData(t *testing.T) {
+	requireTestDB(t)
 	hasDataMonitorID := "has-data"
 	noDataMonitorID := "no-data"
 	groupID := "test-group"
@@ -1264,6 +1195,7 @@ func TestServer_UptimeDataHandler_IncludesConfiguredMonitorsWithNoData(t *testin
 }
 
 func TestServer_UptimeDataByRegionHandler(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-region-monitor"
 	testDate := time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC)
 
@@ -1563,6 +1495,7 @@ func TestServer_CheckerRegistrationAllowsLegacyRegionOnlyRequest(t *testing.T) {
 }
 
 func TestMonitorIncidentsHandlerSkipsStaleMonitorWithoutConfig(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-incidents-handler-missing-config"
 
 	t.Cleanup(func() {
@@ -1623,6 +1556,7 @@ func TestMonitorIncidentsHandlerSkipsStaleMonitorWithoutConfig(t *testing.T) {
 }
 
 func TestMonitorIncidentsHandlerReturnsActiveIncidentMetadata(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-incidents-handler-active"
 	incidentID := "incident-" + monitorID
 	now := time.Now().UTC()
@@ -1764,6 +1698,7 @@ func TestMonitorIncidentsHandlerReturnsActiveIncidentMetadata(t *testing.T) {
 }
 
 func TestMonitorIncidentsHandlerNormalizesNullAffectedRegions(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-incidents-handler-null-regions"
 	now := time.Now().UTC()
 

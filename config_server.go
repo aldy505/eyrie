@@ -10,7 +10,6 @@ import (
 type DatasetConfig struct {
 	RetentionDays                       int     `yaml:"retention_days" default:"90"`
 	CleanupIntervalMinutes              int     `yaml:"cleanup_interval_minutes" default:"60"`
-	CleanupBatchSize                    int     `yaml:"cleanup_batch_size" default:"100000"`
 	PartitionLookaheadDays              int     `yaml:"partition_lookahead_days" default:"7"`
 	ProcessingLookbackMinutes           int     `yaml:"processing_lookback_minutes" default:"10"`
 	PerRegionFailureThresholdPercent    float64 `yaml:"per_region_failure_threshold_percent" default:"40.0"`
@@ -72,11 +71,9 @@ func (c RegisteredChecker) EffectiveName() string {
 }
 
 type DatabaseConfig struct {
-	URL                  string `yaml:"url" envconfig:"DATABASE_URL"`
-	MaxConnections       int    `yaml:"max_connections" default:"20"`
-	MinConnections       int    `yaml:"min_connections" default:"2"`
-	Path                 string `yaml:"path" default:"eyrie.db"`
-	ReadConcurrencyLimit int    `yaml:"read_concurrency_limit" default:"0"`
+	URL            string `yaml:"url" envconfig:"DATABASE_URL"`
+	MaxConnections int    `yaml:"max_connections" default:"20"`
+	MinConnections int    `yaml:"min_connections" default:"2"`
 }
 
 type ServerConfig struct {
@@ -159,24 +156,6 @@ func (c ServerConfig) Validate() error {
 		seenAPIKeys[checker.ApiKey] = struct{}{}
 	}
 
-	if c.Database.ReadConcurrencyLimit < 0 {
-		return fmt.Errorf("database.read_concurrency_limit must be zero or greater")
-	}
-	if c.Database.URL != "" {
-		if c.Database.MaxConnections <= 0 {
-			return fmt.Errorf("database.max_connections must be greater than 0")
-		}
-		if c.Database.MinConnections < 0 {
-			return fmt.Errorf("database.min_connections must be zero or greater")
-		}
-		if c.Database.MinConnections > c.Database.MaxConnections {
-			return fmt.Errorf("database.min_connections must be less than or equal to database.max_connections")
-		}
-	}
-	if c.Dataset.PartitionLookaheadDays < 0 {
-		return fmt.Errorf("dataset.partition_lookahead_days must be zero or greater")
-	}
-
 	switch strings.ToLower(strings.TrimSpace(c.Cache.Backend)) {
 	case "", "memory":
 	case "redis":
@@ -217,15 +196,31 @@ func (c ServerConfig) Validate() error {
 	if c.Dataset.CleanupIntervalMinutes <= 0 {
 		return fmt.Errorf("dataset.cleanup_interval_minutes must be greater than 0")
 	}
-	if c.Dataset.CleanupBatchSize <= 0 {
-		return fmt.Errorf("dataset.cleanup_batch_size must be greater than 0")
-	}
 
 	design := strings.ToLower(strings.TrimSpace(c.Metadata.FrontendDesign))
 	switch design {
 	case "", "hearth", "neobrutalism":
 	default:
 		return fmt.Errorf("metadata.frontend_design must be hearth or neobrutalism")
+	}
+
+	if strings.TrimSpace(c.Database.URL) == "" {
+		return fmt.Errorf("database.url is required")
+	}
+	if c.Database.MaxConnections <= 0 {
+		return fmt.Errorf("database.max_connections must be greater than 0")
+	}
+	if c.Database.MinConnections < 0 {
+		return fmt.Errorf("database.min_connections must be zero or greater")
+	}
+	if c.Database.MinConnections > c.Database.MaxConnections {
+		return fmt.Errorf("database.min_connections must be less than or equal to database.max_connections")
+	}
+	if c.Dataset.RetentionDays <= 0 {
+		return fmt.Errorf("dataset.retention_days must be greater than 0")
+	}
+	if c.Dataset.PartitionLookaheadDays <= 0 {
+		return fmt.Errorf("dataset.partition_lookahead_days must be greater than 0")
 	}
 
 	return nil

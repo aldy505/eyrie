@@ -7,6 +7,7 @@ import (
 )
 
 func TestProcessorWorker_SyncProgrammaticIncidentLifecycle(t *testing.T) {
+	requireTestDB(t)
 	const monitorID = "incident-sync-monitor"
 
 	t.Cleanup(func() {

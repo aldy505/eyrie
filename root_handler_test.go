@@ -11,6 +11,7 @@ import (
 )
 
 func TestRootHandlerSkipsStaleMonitorWithoutConfig(t *testing.T) {
+	requireTestDB(t)
 	monitorID := "test-root-handler-stale-monitor"
 
 	t.Cleanup(func() {
