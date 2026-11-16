@@ -1,17 +1,5 @@
 import type { Metadata, RegionData } from "@/lib/status-dashboard";
-import {
-  getAvailabilityStatus,
-  type AvailabilityStatus,
-} from "@/lib/status-dashboard";
-
-export type FrontendDesign = "neobrutalism" | "hearth";
-export type ThemeMode = "light" | "dark";
-
-export const DESIGN_NAMES: FrontendDesign[] = ["neobrutalism", "hearth"];
-
-export function isValidDesign(value: string): value is FrontendDesign {
-  return DESIGN_NAMES.includes(value as FrontendDesign);
-}
+import { getAvailabilityStatus, type AvailabilityStatus } from "@/lib/status-dashboard";
 
 export function getTodayDowntimeMinutes(region: RegionData["monitors"][number]): number {
   return region.downtimes["0"]?.duration_minutes ?? 0;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { ThemeMode } from "@/lib/design-config";
+
+export type ThemeMode = "light" | "dark";
 
 const STORAGE_KEY = "eyrie.theme";
 

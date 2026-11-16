@@ -42,7 +42,6 @@ export const uptimeDataSchema = z.object({
 export const metadataSchema = z.object({
   title: z.string().default("Status Page"),
   show_last_updated: z.boolean().default(true),
-  frontend_design: z.enum(["hearth", "neobrutalism"]).default("hearth"),
   retention_days: z.number(),
   degraded_threshold_minutes: z.number(),
   failure_threshold_minutes: z.number(),

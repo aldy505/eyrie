@@ -1,66 +1,64 @@
 import type { Metadata, RegionData, UptimeData } from "@/lib/status-dashboard";
-import { UptimeBars } from "@/components/uptime-bars";
-import {
-  getAvailabilityRatio,
-  formatAvailability,
-} from "@/lib/status-dashboard";
+import { formatAvailability, getAvailabilityRatio } from "@/lib/status-dashboard";
 import { getTodayDowntimeMinutes } from "@/lib/design-config";
-import { RegionRow } from "./region-row";
+import { NodeAccordion } from "./node-accordion";
 
 type ServiceCardProps = {
   service: UptimeData["monitors"][number];
   regionMap: Record<string, RegionData["monitors"]>;
   metadata: Metadata;
+  openIds: ReadonlySet<string>;
+  onToggleNode: (monitorId: string) => void;
 };
 
-export function ServiceCard({ service, regionMap, metadata }: ServiceCardProps) {
-  // Compute average availability across all monitor regions
+export function ServiceCard({
+  service,
+  regionMap,
+  metadata,
+  openIds,
+  onToggleNode,
+}: ServiceCardProps) {
   let totalDowntime = 0;
-  let regionCount = 0;
+  let probeCount = 0;
+
   for (const monitor of service.monitors) {
     const regions = regionMap[monitor.id] ?? [];
+    if (regions.length === 0) {
+      totalDowntime += monitor.downtimes["0"]?.duration_minutes ?? 0;
+      probeCount++;
+      continue;
+    }
+
     for (const region of regions) {
       totalDowntime += getTodayDowntimeMinutes(region);
-      regionCount++;
+      probeCount++;
     }
   }
-  const avgDowntime = regionCount > 0 ? totalDowntime / regionCount : 0;
+
+  const avgDowntime = probeCount > 0 ? totalDowntime / probeCount : 0;
   const availability = formatAvailability(getAvailabilityRatio(avgDowntime));
 
   return (
-    <div className="neobrutalism-service-card">
-      <div className="neobrutalism-service-header">
+    <section className="neobrutalism-service-card">
+      <header className="neobrutalism-service-header">
         <h2 className="neobrutalism-service-name">{service.name}</h2>
         <span className="neobrutalism-service-uptime">{availability}</span>
-      </div>
+      </header>
 
       {service.monitors.length === 0 ? (
-        <p className="neobrutalism-empty" style={{ marginTop: 12 }}>No monitors configured</p>
+        <p className="neobrutalism-empty">No monitors configured</p>
       ) : (
-        service.monitors.map((monitor) => {
-          const regions = regionMap[monitor.id] ?? [];
-          return (
-            <div key={monitor.id} className="neobrutalism-monitor-block">
-              <h3 className="neobrutalism-monitor-name">{monitor.name}</h3>
-              {regions.map((region) => (
-                <RegionRow
-                  key={region.region}
-                  region={region}
-                  metadata={metadata}
-                />
-              ))}
-              <UptimeBars
-                monitor={monitor}
-                metadata={metadata}
-                className="neobrutalism-uptime-bars"
-                barClassName="neobrutalism-uptime-bars-bar"
-                noDataBarClassName="neobrutalism-uptime-bars-nodata"
-                labelClassName="neobrutalism-uptime-bars-label"
-              />
-            </div>
-          );
-        })
+        service.monitors.map((monitor) => (
+          <NodeAccordion
+            key={monitor.id}
+            monitor={monitor}
+            regions={regionMap[monitor.id] ?? []}
+            metadata={metadata}
+            isOpen={openIds.has(monitor.id)}
+            onToggle={() => onToggleNode(monitor.id)}
+          />
+        ))
       )}
-    </div>
+    </section>
   );
 }
