@@ -86,7 +86,6 @@ type ServerConfig struct {
 	Metadata struct {
 		Title           string `yaml:"title" default:"Status Page"`
 		ShowLastUpdated bool   `yaml:"show_last_updated" default:"true"`
-		FrontendDesign  string `yaml:"frontend_design" default:"hearth" envconfig:"EYRIE_FRONTEND_DESIGN"`
 	} `yaml:"metadata"`
 	RegisteredCheckers []RegisteredChecker `yaml:"registered_checkers"`
 	Database           DatabaseConfig      `yaml:"database"`
@@ -195,13 +194,6 @@ func (c ServerConfig) Validate() error {
 
 	if c.Dataset.CleanupIntervalMinutes <= 0 {
 		return fmt.Errorf("dataset.cleanup_interval_minutes must be greater than 0")
-	}
-
-	design := strings.ToLower(strings.TrimSpace(c.Metadata.FrontendDesign))
-	switch design {
-	case "", "hearth", "neobrutalism":
-	default:
-		return fmt.Errorf("metadata.frontend_design must be hearth or neobrutalism")
 	}
 
 	if strings.TrimSpace(c.Database.URL) == "" {
